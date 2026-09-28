@@ -20,28 +20,29 @@ if(NOT CROSSZIG_TARGET)
             "CROSSZIG_TARGET is not set. Pass -DCROSSZIG_TARGET=<linux-64|win-64|osx-64|osx-arm64>.")
 endif()
 
-# Map the pixi platform name onto what CMake and zig each want to hear.
-if(CROSSZIG_TARGET STREQUAL "linux-64")
-    set(CMAKE_SYSTEM_NAME Linux)
-    set(CMAKE_SYSTEM_PROCESSOR x86_64)
-    # Pinning the glibc version keeps the output runnable on distributions that
-    # are older than whatever host happens to build it.
-    set(_crosszig_triple "x86_64-linux-gnu.2.28")
-elseif(CROSSZIG_TARGET STREQUAL "win-64")
-    set(CMAKE_SYSTEM_NAME Windows)
-    set(CMAKE_SYSTEM_PROCESSOR AMD64)
-    set(_crosszig_triple "x86_64-windows-gnu")
-elseif(CROSSZIG_TARGET STREQUAL "osx-64")
-    set(CMAKE_SYSTEM_NAME Darwin)
-    set(CMAKE_SYSTEM_PROCESSOR x86_64)
-    set(_crosszig_triple "x86_64-macos-none")
-elseif(CROSSZIG_TARGET STREQUAL "osx-arm64")
-    set(CMAKE_SYSTEM_NAME Darwin)
-    set(CMAKE_SYSTEM_PROCESSOR arm64)
-    set(_crosszig_triple "aarch64-macos-none")
-else()
-    message(FATAL_ERROR "Unsupported CROSSZIG_TARGET '${CROSSZIG_TARGET}'.")
+# What each pixi platform maps onto lives in targets.json rather than here,
+# because dev.py records those triples in the dist manifest and has to read the
+# very same values. One file both sides parse cannot drift; two copies can.
+set(_crosszig_targets_file "${CMAKE_CURRENT_LIST_DIR}/targets.json")
+file(READ "${_crosszig_targets_file}" _crosszig_targets)
+
+string(JSON _crosszig_platform ERROR_VARIABLE _crosszig_json_error
+       GET "${_crosszig_targets}" "platforms" "${CROSSZIG_TARGET}")
+if(NOT _crosszig_json_error STREQUAL "NOTFOUND")
+    message(FATAL_ERROR
+            "Unsupported CROSSZIG_TARGET '${CROSSZIG_TARGET}': ${_crosszig_json_error}")
 endif()
+
+string(JSON CMAKE_SYSTEM_NAME GET "${_crosszig_platform}" "system")
+string(JSON CMAKE_SYSTEM_PROCESSOR GET "${_crosszig_platform}" "processor")
+string(JSON _crosszig_triple GET "${_crosszig_platform}" "triple")
+
+# The instruction set the generated code may assume. zig already defaults to
+# `baseline` for a cross target, but saying it out loud keeps it from turning
+# into an accident: a binary built for a newer CPU level still links fine and
+# only dies at runtime, and nothing in the file format records which level was
+# used, so there would be nothing left to check afterwards.
+string(JSON _crosszig_cpu GET "${_crosszig_targets}" "cpu")
 
 find_program(CROSSZIG_ZIG_EXECUTABLE NAMES zig REQUIRED
              DOC "zig compiler used as the cross toolchain")
@@ -89,8 +90,8 @@ function(_crosszig_wrapper out_var name)
     set(${out_var} "${_output}" PARENT_SCOPE)
 endfunction()
 
-_crosszig_wrapper(_crosszig_cc     zig-cc     cc     -target ${_crosszig_triple})
-_crosszig_wrapper(_crosszig_cxx    zig-cxx    c++    -target ${_crosszig_triple})
+_crosszig_wrapper(_crosszig_cc  zig-cc  cc  -target ${_crosszig_triple} -mcpu=${_crosszig_cpu})
+_crosszig_wrapper(_crosszig_cxx zig-cxx c++ -target ${_crosszig_triple} -mcpu=${_crosszig_cpu})
 _crosszig_wrapper(_crosszig_ar     zig-ar     ar)
 _crosszig_wrapper(_crosszig_ranlib zig-ranlib ranlib)
 

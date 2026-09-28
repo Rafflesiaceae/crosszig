@@ -30,9 +30,15 @@ BUILD_ROOT = ROOT / "build"
 DIST_DIR = ROOT / "dist"
 MANIFEST = ROOT / "dist-manifest.json"
 TOOLCHAIN = ROOT / "cmake" / "ZigToolchain.cmake"
+TARGETS = ROOT / "cmake" / "targets.json"
 
-# Must stay in sync with `platforms` in pixi.toml and with ZigToolchain.cmake.
-PLATFORMS = ["linux-64", "win-64", "osx-64", "osx-arm64"]
+# The one place the platforms are spelled out is cmake/targets.json, which the
+# toolchain file reads as well. Must match `platforms` in pixi.toml.
+PLATFORMS = sorted(json.loads(TARGETS.read_text())["platforms"])
+
+# What the leading component of a zig triple says the architecture will be,
+# named the way tools/binfmt.py reports it.
+ARCH_BY_TRIPLE = {"x86_64": "x86-64", "aarch64": "arm64", "x86": "x86", "arm": "arm"}
 
 # Set once we have re-executed ourselves inside the pixi environment, so that
 # the second run never tries to do it again.
@@ -106,9 +112,23 @@ def install_dir(target, config):
 def build_one(target, config, jobs=None, clean=False):
     """Configure, build and install a single target platform."""
     output = build_dir(target, config)
+    cpu, triples = toolchain_targets()
+    stamp = output / ".crosszig-build-inputs"
+    inputs = f"{triples[target]} -mcpu={cpu}\n"
+
+    # The target triple is baked into the generated compiler shims rather than
+    # into the compile command lines, so ninja cannot see it change and would
+    # report "no work to do" against the old artifacts. Editing targets.json
+    # therefore has to discard the build directory.
+    if stamp.is_file() and stamp.read_text() != inputs:
+        print(f"build inputs changed, discarding {output}", flush=True)
+        clean = True
 
     if clean:
         shutil.rmtree(output, ignore_errors=True)
+
+    output.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(inputs)
 
     # CMake is cheap to re-run and skips the work when nothing changed, so this
     # is called unconditionally instead of checking for an existing cache.
@@ -130,16 +150,19 @@ def build_one(target, config, jobs=None, clean=False):
     run(["cmake", "--install", output, "--prefix", install_dir(target, config)])
 
 
-def targeted_glibc():
-    """The glibc version the linux-64 target is pinned to in the toolchain file.
+def toolchain_targets():
+    """The build inputs the toolchain uses, as recorded in cmake/targets.json."""
+    data = json.loads(TARGETS.read_text())
+    return data["cpu"], {name: entry["triple"] for name, entry in data["platforms"].items()}
 
-    Read back from ZigToolchain.cmake rather than duplicated here, so that the
-    manifest cannot quietly disagree with what is actually being built.
-    """
-    match = re.search(r"x86_64-linux-gnu\.([0-9][0-9.]*)", TOOLCHAIN.read_text())
-    if not match:
-        sys.exit(f"dev.py: no pinned glibc version found in {TOOLCHAIN}")
-    return match.group(1)
+
+def platform_of(name):
+    """Which platform a collected file belongs to, from its name suffix."""
+    stem = Path(name).stem
+    for candidate in PLATFORMS:
+        if stem.endswith(f"-{candidate}"):
+            return candidate
+    return None
 
 
 def dist_name(path, target):
@@ -147,67 +170,122 @@ def dist_name(path, target):
     return f"{path.stem}-{target}{path.suffix}"
 
 
+def file_profile(path):
+    """The recorded description of one collected file."""
+    return {"platform": platform_of(path.name), **binfmt.profile(path)}
+
+
 def build_manifest(directory):
     """Describes `directory` the way dist-manifest.json records it."""
+    cpu, triples = toolchain_targets()
     return {
-        "glibc": targeted_glibc(),
+        "cpu": cpu,
+        "triples": dict(sorted(triples.items())),
         "files": {
-            path.name: binfmt.dynamic_dependencies(path)
+            path.name: file_profile(path)
             for path in sorted(directory.iterdir())
             if path.is_file()
         },
     }
 
 
+def compare_profile(name, recorded, found):
+    """Reports every way the profile read back differs from the recorded one."""
+    problems = []
+    for key in sorted(set(recorded) | set(found)):
+        if key not in recorded:
+            problems.append(f"{name}: {key} appeared, now {found[key]!r}")
+        elif key not in found:
+            problems.append(f"{name}: {key} is gone, manifest has {recorded[key]!r}")
+        elif recorded[key] != found[key]:
+            problems.append(f"{name}: {key} is {found[key]!r}, manifest says {recorded[key]!r}")
+    return problems
+
+
+def check_invariants(name, found, triple):
+    """Checks the profile against the build inputs rather than against the
+    manifest, so that a manifest regenerated from a broken build still fails.
+    """
+    problems = []
+
+    if triple is None:
+        return [f"{name}: no known platform in the file name"]
+
+    expected_arch = ARCH_BY_TRIPLE.get(triple.split("-")[0])
+    if expected_arch and found.get("arch") != expected_arch:
+        problems.append(
+            f"{name}: built for {found.get('arch')}, but {triple} targets {expected_arch}")
+
+    # Nothing here should ever need a search path baked into it; one showing up
+    # means a build directory leaked into the artifact.
+    for key in ("runpath", "rpath"):
+        if found.get(key):
+            problems.append(f"{name}: {key} is not empty: {found[key]}")
+
+    if found.get("format") == "elf":
+        ceiling = re.search(r"-gnu\.([0-9][0-9.]*)$", triple)
+        needed = found.get("symbol-versions", {}).get("GLIBC")
+        if ceiling and needed and \
+                binfmt.version_tuple(needed) > binfmt.version_tuple(ceiling.group(1)):
+            problems.append(
+                f"{name}: needs glibc {needed}, above the targeted {ceiling.group(1)}")
+
+    if found.get("format") == "macho":
+        floor = re.search(r"-macos\.([0-9][0-9.]*)-", triple)
+        declared = found.get("macos-min")
+        if floor and (declared is None or
+                      binfmt.version_tuple(declared) != binfmt.version_tuple(floor.group(1))):
+            problems.append(
+                f"{name}: declares macOS {declared}, but {triple} targets {floor.group(1)}")
+
+        # arm64 macOS will not execute an unsigned binary at all.
+        if found.get("arch", "").startswith("arm64") and not found.get("code-signature"):
+            problems.append(f"{name}: arm64 macOS binary carries no code signature")
+
+    return problems
+
+
 def check_dist(directory):
     """Verifies `directory` against dist-manifest.json. Returns True when clean.
 
-    The manifest defines the complete expected content: every file it lists has
-    to be there, has to need every library it lists, and must not need any
-    other. Files in the directory that the manifest does not mention are
-    reported too, so that a stale artifact cannot slip through unnoticed.
-
-    On top of that, no ELF file may need a glibc newer than the recorded one,
-    which is what keeps the binaries loadable on older distributions.
+    Three things are checked. The manifest's record of the build inputs has to
+    match cmake/targets.json, so that retargeting cannot go unnoticed. Every
+    file has to be present and to read back exactly the profile recorded for
+    it. And every profile has to satisfy the invariants that follow from the
+    zig triple it was built with, which is what still catches a bad build after
+    someone has regenerated the manifest from it.
     """
     if not MANIFEST.is_file():
         sys.exit(f"dev.py: no manifest at {MANIFEST}")
 
     manifest = json.loads(MANIFEST.read_text())
-    expected_glibc = manifest["glibc"]
+    cpu, triples = toolchain_targets()
     problems = []
 
-    # A changed pin in the toolchain file has to be acknowledged by
-    # regenerating the manifest, otherwise the ceiling checked below would
-    # silently stop matching what is being built.
-    pinned_glibc = targeted_glibc()
-    if expected_glibc != pinned_glibc:
+    if manifest["cpu"] != cpu:
         problems.append(
-            f"manifest records glibc {expected_glibc}, but {TOOLCHAIN.name} "
-            f"pins {pinned_glibc}")
+            f"manifest builds for cpu {manifest['cpu']}, but {TARGETS.name} says {cpu}")
+    for platform_name in sorted(set(manifest["triples"]) | set(triples)):
+        recorded = manifest["triples"].get(platform_name)
+        actual = triples.get(platform_name)
+        if recorded != actual:
+            problems.append(f"triple for {platform_name}: manifest has {recorded}, "
+                            f"{TARGETS.name} has {actual}")
 
-    for name, expected in sorted(manifest["files"].items()):
+    for name, recorded in sorted(manifest["files"].items()):
         path = directory / name
         if not path.is_file():
             problems.append(f"{name}: missing")
             continue
 
         try:
-            actual = binfmt.dynamic_dependencies(path)
-            needed_glibc = binfmt.glibc_requirement(path)
-        except (binfmt.UnknownFormat, OSError) as error:
+            found = file_profile(path)
+        except (binfmt.UnknownFormat, OSError, ValueError) as error:
             problems.append(f"{name}: {error}")
             continue
 
-        for library in sorted(set(expected) - set(actual)):
-            problems.append(f"{name}: expected dependency is not linked: {library}")
-        for library in sorted(set(actual) - set(expected)):
-            problems.append(f"{name}: unexpected dependency: {library}")
-
-        if needed_glibc is not None and \
-                binfmt.version_tuple(needed_glibc) > binfmt.version_tuple(expected_glibc):
-            problems.append(
-                f"{name}: needs glibc {needed_glibc}, above the targeted {expected_glibc}")
+        problems += compare_profile(name, recorded, found)
+        problems += check_invariants(name, found, triples.get(found.get("platform")))
 
     for path in sorted(directory.iterdir()):
         if path.is_file() and path.name not in manifest["files"]:
@@ -219,8 +297,7 @@ def check_dist(directory):
             print(f"  {problem}", file=sys.stderr)
         return False
 
-    print(f"\ndist-check ok: {len(manifest['files'])} files in {directory}, "
-          f"glibc <= {expected_glibc}")
+    print(f"\ndist-check ok: {len(manifest['files'])} files in {directory}")
     return True
 
 

@@ -29,9 +29,10 @@ installs into `build/<platform>-<config>/install/`.
 | ------------------------- | ------------------------------------------------------------ |
 | `src/`                    | Sample code: a log-line parser built on Boost.Regex           |
 | `cmake/ZigToolchain.cmake`| Toolchain file that turns `zig cc` / `zig c++` into a cross compiler |
+| `cmake/targets.json`      | The zig triple and CPU baseline each platform builds with     |
 | `cmake/Dependencies.cmake`| Fetches Boost and shares one checkout across all platforms    |
 | `dev.py`                  | Thin cross-platform wrapper around the CMake commands         |
-| `tools/binfmt.py`         | Reads the dynamic dependencies out of ELF, PE and Mach-O files|
+| `tools/binfmt.py`         | Reads compatibility facts out of ELF, PE and Mach-O files     |
 | `dist-manifest.json`      | The expected content of a distribution                        |
 
 `src/` produces two things:
@@ -63,11 +64,25 @@ it is building for and keep `find_package` away from host libraries.
 Since zig ships the headers, libc stubs and runtime libraries for all of its
 targets, no additional SDK is needed - including for the macOS targets.
 
-The `linux-64` triple carries an explicit glibc version (`x86_64-linux-gnu.2.28`).
-Without it zig would target the glibc of whichever machine runs the build, and
-the result would then refuse to start on anything older. 2.28 is what RHEL 8,
-Debian 10 and Ubuntu 18.10 ship. Lowering the number restricts which symbol
-versions the linker may use; raising it widens them.
+Which triple each platform maps to lives in `cmake/targets.json`, read both by
+the toolchain file and by `dev.py`, so the two cannot drift apart. Three parts
+of those triples are deliberate choices rather than defaults:
+
+* **`x86_64-linux-gnu.2.28`** pins glibc. Without the suffix zig would target
+  the glibc of whichever machine runs the build, and the result would refuse to
+  start on anything older. 2.28 is what RHEL 8, Debian 10 and Ubuntu 18.10 ship.
+* **`macos.11.0`** pins the macOS deployment target to Big Sur. zig's own
+  default is considerably newer, which would exclude perfectly current
+  machines for no reason. Note the version needs a minor component:
+  `x86_64-macos.11-none` is rejected as `InvalidOperatingSystemVersion`.
+* **`"cpu": "baseline"`** pins the instruction set. zig already defaults to
+  this for a cross target, but it is stated explicitly because it is the one
+  compatibility property that cannot be verified after the fact.
+
+Editing a triple discards the affected build directory automatically. The
+triple lives inside the generated compiler shims rather than in the compile
+command lines, so ninja cannot see it change and would otherwise happily
+report "no work to do" against artifacts built for the old target.
 
 ## Distribution
 
@@ -86,43 +101,79 @@ is off. `./dev.py dist-check <dir>` runs the same verification on its own, so a
 distribution can also be checked after the fact, for instance once it has been
 unpacked somewhere else.
 
-The manifest looks like this:
+The manifest records two things: the build inputs, and a profile of every
+file that was collected.
 
 ```json
 {
-    "glibc": "2.28",
+    "cpu": "baseline",
+    "triples": { "linux-64": "x86_64-linux-gnu.2.28", "...": "..." },
     "files": {
-        "crosszig-linux-64": ["libm.so.6", "libpthread.so.0", "..."],
-        "libcrosszig-linux-64.a": []
+        "crosszig-linux-64": {
+            "platform": "linux-64",
+            "format": "elf",
+            "arch": "x86-64",
+            "needs": ["libc.so.6", "..."],
+            "symbol-versions": { "GLIBC": "2.16" },
+            "runpath": [],
+            "min-kernel": "2.0.0"
+        }
     }
 }
 ```
 
-`files` describes the complete expected content: every file it lists has to be
-present, has to need exactly the dynamic libraries it lists, and any file in
-the directory that the manifest does not mention is reported as well. This is
-what catches a cross build that accidentally picked up a host library. Names
-are whatever the container format records - a soname for ELF (`libc.so.6`), an
-import table entry for PE (`KERNEL32.dll`), an install name for Mach-O
-(`/usr/lib/libSystem.B.dylib`). Static archives carry no link information of
-their own and therefore map to an empty list; for them only presence is
-checked.
+Which profile keys appear depends on the format, because the formats record
+genuinely different things:
 
-`glibc` is the version the `linux-64` target is pinned to, and it is checked
-from both sides: it has to agree with the pin in `cmake/ZigToolchain.cmake`, so
-that changing the pin cannot go unnoticed, and no ELF file may reference a
-symbol version above it. Today the binaries stay well under the ceiling - the
-highest they actually reach for is `GLIBC_2.16`.
+| Format    | Keys                                                            |
+| --------- | --------------------------------------------------------------- |
+| all       | `format`, `arch`                                                  |
+| `elf`     | `needs`, `symbol-versions`, `runpath`, `min-kernel`               |
+| `pe`      | `needs`, `min-os`, `subsystem-version`                            |
+| `macho`   | `needs`, `dylib-compat`, `rpath`, `macos-min`, `code-signature`   |
+| `archive` | nothing further                                                   |
 
-Reading those three formats is done by `tools/binfmt.py` rather than by
-`readelf`/`objdump`/`otool`, because no single one of those tools reads all
-three and a given host generally has at most one of them.
+Dependency names are whatever the container itself stores: a soname for ELF
+(`libc.so.6`), an import table entry for PE (`KERNEL32.dll`), an install name
+for Mach-O (`/usr/lib/libSystem.B.dylib`). `symbol-versions` is keyed on the
+version namespace rather than on the library, because that is the part that
+decides compatibility: `GLIBC_2.16` means glibc 2.16 or newer regardless of
+which of libc, libm or libpthread pulled it in.
+
+`dist-check` then asserts three separate things:
+
+1. **The build inputs still match `cmake/targets.json`.** Retargeting a
+   platform cannot go unnoticed.
+2. **Every file is present and reads back exactly its recorded profile.** Any
+   file in the directory that the manifest does not mention is reported too.
+3. **Every profile satisfies the invariants implied by its zig triple.** This
+   is the part that still catches a bad build after someone has regenerated
+   the manifest from it:
+   - the architecture has to be the one the triple names, so an `osx-arm64`
+     slot cannot quietly hold an x86-64 binary,
+   - no ELF may need a glibc above the version pinned in the triple,
+   - a Mach-O has to declare exactly the macOS minimum the triple asks for,
+   - an arm64 macOS binary has to carry a code signature, because arm64 macOS
+     refuses to execute an unsigned one at all,
+   - `runpath` / `rpath` have to be empty, since a non-empty one means a build
+     directory leaked into the artifact.
+
+Reading those formats is done by `tools/binfmt.py` rather than by
+`readelf`/`objdump`/`otool`, because no single one of those reads all three
+and a given host generally has at most one of them.
+
+One thing deliberately *not* checked: the CPU baseline the code was generated
+for. Nothing in any of these containers records it unless the toolchain emits
+a `.note.gnu.property` marker, and ours does not, so an `-march=native` leak
+would build cleanly, pass every check here, and only fail on an older CPU at
+runtime. That is why `cpu` is pinned in `cmake/targets.json` and passed to zig
+explicitly, and why the manifest records it as provenance rather than as
+something read back from the files.
 
 `dist` deliberately only handles the release build: a debug binary picks up
 extra imports (`ntdll.dll` on Windows, for one), so a single manifest could not
 describe both configurations. Use `./dev.py dist --write-manifest` to
-regenerate the manifest from what was just collected, after an intentional
-change.
+regenerate the manifest after an intentional change.
 
 ## Dependency cache
 

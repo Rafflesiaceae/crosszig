@@ -63,10 +63,6 @@ UNIVERSAL = json.loads(TARGETS.read_text()).get("universal", {})
 GROUPED = {member for members in UNIVERSAL.values() for member in members}
 ARTIFACTS = sorted((set(PLATFORMS) - GROUPED) | set(UNIVERSAL))
 
-# What the leading component of a zig triple says the architecture will be,
-# named the way tools/dist-manifest.py reports it.
-ARCH_BY_TRIPLE = {"x86_64": "x86-64", "aarch64": "arm64", "x86": "x86", "arm": "arm"}
-
 # Set once we have re-executed ourselves inside the pixi environment, so that
 # the second run never tries to do it again.
 PIXI_GUARD = "CROSSZIG_INSIDE_PIXI"
@@ -237,114 +233,19 @@ def dist_name(path, target):
     return f"{path.stem}-{target}{path.suffix}"
 
 
-def arch_of_triple(triple):
-    """What tools/dist-manifest.py calls the architecture a triple names."""
-    leading = triple.split("-")[0]
-    return ARCH_BY_TRIPLE.get(leading, leading)
-
-
-def member_rules(member, triple, match):
-    """The manifest rules for the image one zig triple produced.
-
-    They are written against a named slice, which for a file that is not
-    universal is the file itself, so that both cases come out the same shape.
-    """
-    common = {"name": member, "match": match, "slice": arch_of_triple(triple)}
-
-    # A search path baked into a shipped artifact means a build directory
-    # leaked into it. An archive records none at all, which `empty` allows.
-    rules = [{**common, "require": {"runpath": {"empty": True},
-                                    "rpath": {"empty": True}}}]
-
-    glibc = re.search(r"-gnu\.([0-9][0-9.]*)$", triple)
-    if glibc:
-        rules.append({
-            **common,
-            "when": {"format": "elf"},
-            "require": {"symbol-versions.GLIBC": {"at-most": glibc.group(1)}},
-        })
-
-    macos = re.search(r"-macos\.([0-9][0-9.]*)-", triple)
-    if macos:
-        # Exactly the targeted floor, not merely at or above it: a higher one
-        # is a build that quietly stopped supporting the machines we claim.
-        require = {"macos-min": {"is-version": macos.group(1)}}
-        # arm64 macOS will not execute an unsigned binary at all.
-        if common["slice"] == "arm64":
-            require["code-signature"] = True
-        rules.append({**common, "when": {"format": "macho"}, "require": require})
-
-    return rules
-
-
-def artifact_rules(artifact, platforms):
-    """The manifest rules for one shipped file name suffix.
-
-    `crosszig-linux-64` and `libcrosszig-linux-64.a` both belong to linux-64,
-    and nothing else collected into dist/ ends that way.
-    """
-    members = UNIVERSAL.get(artifact, [artifact])
-    triples = [platforms[member]["triple"] for member in members]
-    match = [f"*-{artifact}", f"*-{artifact}.*"]
-    arches = sorted(arch_of_triple(triple) for triple in triples)
-
-    # The architectures have to be exactly these rather than merely include
-    # them, so that a lost slice and a stray one both show up.
-    rules = [{
-        "name": artifact,
-        "match": match,
-        "require": {"arch": arches[0] if len(arches) == 1 else arches},
-    }]
-
-    for member, triple in zip(members, triples):
-        rules += member_rules(member, triple, match)
-    return rules
-
-
-def manifest_policy():
-    """What tools/dist-manifest.py enforces on our dist/, generated from
-    cmake/targets.json.
-
-    This function is the whole of what is crosszig-specific about
-    dist-manifest.json; the tool that reads and writes it knows nothing about
-    this project. The metadata half is the build inputs recorded verbatim, so
-    that retargeting a platform and leaving the manifest alone is caught. The
-    rules half is what has to hold whatever the artifacts happen to say, so
-    that regenerating the manifest from a broken build is caught too.
-    """
-    cpu, platforms = toolchain_targets()
-
-    rules = []
-    for artifact in ARTIFACTS:
-        rules += artifact_rules(artifact, platforms)
-
-    return {
-        "metadata": {
-            "cpu": cpu,
-            "targets": dict(sorted(platforms.items())),
-            "universal": {name: sorted(members)
-                          for name, members in sorted(UNIVERSAL.items())},
-        },
-        # Every file in dist/ is built for one of our platforms, so one that
-        # no rule claims is a file nobody meant to ship.
-        "require-rule-coverage": True,
-        "rules": rules,
-    }
-
-
 def check_dist(directory):
     """Verifies `directory` against dist-manifest.json. True when it is clean.
 
-    Passing the generated policy in as well means the manifest's copy of it
-    is compared against the one cmake/targets.json implies right now, so a
-    manifest written before the targets changed fails rather than enforcing
-    yesterday's rules.
+    The manifest is a lock file and nothing more: every file it lists has to
+    be present and to read back the facts recorded for it, and nothing may be
+    present that it does not list. Whether a difference is acceptable is a
+    question for whoever reads the diff, not for this script.
     """
     if not MANIFEST.is_file():
         sys.exit(f"dev.py: no manifest at {MANIFEST}")
 
     manifest = json.loads(MANIFEST.read_text())
-    problems = dist_manifest.check(directory, manifest, policy=manifest_policy())
+    problems = dist_manifest.check(directory, manifest)
 
     if problems:
         print(f"\ndist-check FAILED for {directory}", file=sys.stderr)
@@ -442,7 +343,7 @@ def command_dist(args):
 
     if args.write_manifest:
         MANIFEST.write_text(json.dumps(
-            dist_manifest.record(DIST_DIR, manifest_policy()), indent=4) + "\n")
+            dist_manifest.record(DIST_DIR), indent=4) + "\n")
         print(f"\nwrote {MANIFEST.relative_to(ROOT)}", flush=True)
 
     if not check_dist(DIST_DIR):

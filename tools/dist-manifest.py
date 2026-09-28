@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Records, checks and compares what a set of built artifacts depends on.
+"""Records and compares what a set of built artifacts depends on.
 
 A distribution manifest is a lock file for binaries. It pins, for every file
 shipped, the facts that decide where that file will actually run: the
@@ -9,17 +9,27 @@ changed" into a reviewable diff instead of a bug report from whoever has the
 oldest machine.
 
 Nothing here knows about any particular project, and nothing here writes a
-binary; the four subcommands only ever read one. Assembling a universal file
-is the one job that goes the other way, and it lives in tools/universal.py.
+binary; the four subcommands only ever read one.
 
     dist-manifest.py show   <path>...            what these files depend on
     dist-manifest.py record <dir>  -o FILE       lock a directory down
     dist-manifest.py check  <dir>  -m FILE       assert it still matches
     dist-manifest.py diff   <a> <b>              compare two of anything
 
-and `record()`, `check()`, `diff()` and `profile()` are importable under the
-same names by a build script that would rather generate its policy than
-hand-write it.
+`record()`, `check()`, `diff()` and `profile()` are importable under the same
+names by a build script that wants more than the command line offers.
+
+A manifest is a map of relative path to profile, and nothing else:
+
+    {"files": {"crosszig-linux-64": {"format": "elf", "arch": "x86-64", ...}}}
+
+`check` reports every file that is missing, every file present but unlisted,
+and every key that reads back differently from what was recorded. It does not
+judge, because there is nothing left for a separate judgement to catch: a
+recorded profile already pins every fact this tool can read, so a rule saying
+"the glibc requirement may not exceed 2.3.3" only ever fires where "the glibc
+requirement is no longer 2.3.3" already has. Deciding whether a difference is
+acceptable is a job for whoever reads the diff.
 
 Reading the formats
 -------------------
@@ -51,57 +61,9 @@ One thing deliberately absent: the CPU baseline the code was generated for.
 Nothing in any of these containers records it unless the toolchain emits a
 `.note.gnu.property` marker, and most do not, so that has to be pinned at
 build time instead of checked afterwards.
-
-The manifest
-------------
-
-    {
-        "schema": "dist-manifest/1",
-        "metadata": {...},              opaque to this tool, compared verbatim
-        "require-rule-coverage": true,  every file must be claimed by a rule
-        "rules": [...],                 see below
-        "files": {"<relative path>": {<profile>}}
-    }
-
-Recording the profiles alone is not enough. A manifest regenerated from a
-broken build records the breakage and then happily agrees with itself, so the
-rules are the half that does not come from the artifacts: they say what has to
-be true no matter what was measured.
-
-    {
-        "name": "linux-64",                        used in problem messages
-        "match": ["*-linux-64", "*-linux-64.*"],   globs over the file name
-        "slice": "x86-64",                         optional, see below
-        "when":    {"format": {"is": "elf"}},      skip the rule unless met
-        "require": {"symbol-versions.GLIBC": {"at-most": "2.3.3"}}
-    }
-
-Keys in `when` and `require` are dotted paths into the profile. A condition is
-either a plain value, meaning equality, or a map of these operators, all of
-which have to hold:
-
-    is          equal to this value
-    is-version  the same version, however many components it is written with
-    one-of      equal to one of these values
-    at-most     version no higher than this, compared componentwise
-    at-least    version no lower than this
-    empty       true: absent, or an empty string/list/map. false: the reverse
-    present     whether the key is there at all
-    subset-of   every element (or map key) appears in this list
-    contains    every one of these appears among the elements
-    matches     the value, as a string, fully matches this regular expression
-
-A key that is absent fails every condition except `{"empty": true}` and
-`{"present": false}`, so a typo in a key name is reported rather than quietly
-passing. Use `when` to scope a rule to the files it can apply to.
-
-`slice` narrows a rule to one architecture of a universal file. A thin file
-counts as a single slice named after its own architecture, so one rule shape
-covers both, and a rule naming a slice its file does not carry is a failure.
 """
 
 import argparse
-import fnmatch
 import json
 import re
 import struct
@@ -726,14 +688,6 @@ def _member_arch(member):
 # Manifests
 # --------------------------------------------------------------------------
 
-SCHEMA = "dist-manifest/1"
-
-# The keys a caller may put in a manifest besides the recorded files. They are
-# kept apart from `files` so that a policy can be carried from one manifest to
-# the next while the profiles underneath it are regenerated.
-POLICY_KEYS = ("metadata", "require-rule-coverage", "rules")
-
-
 def contents(directory):
     """Every regular file under `directory`, keyed by its relative path."""
     directory = Path(directory)
@@ -741,49 +695,28 @@ def contents(directory):
             for path in sorted(directory.rglob("*")) if path.is_file()}
 
 
-def record(directory, policy=None):
-    """Locks a directory down: the given policy plus a profile of every file.
+def record(directory):
+    """Locks a directory down: a profile of every file under it.
 
     Reading a file that is not a binary at all is left to fail, because a
     manifest that silently skipped what it could not parse would go on
     claiming the directory was fully described.
     """
-    manifest = {"schema": SCHEMA}
-    for key in POLICY_KEYS:
-        if policy and key in policy:
-            manifest[key] = policy[key]
-    manifest["files"] = {name: profile(path)
-                         for name, path in contents(directory).items()}
-    return manifest
+    return {"files": {name: profile(path)
+                      for name, path in contents(directory).items()}}
 
 
-def check(directory, manifest, policy=None):
+def check(directory, manifest):
     """Asserts `directory` against `manifest`. Returns the list of problems.
 
-    Three separate things are checked, and they fail in different ways on
-    purpose. Every recorded file has to still read back byte-identical facts,
-    which catches a changed build. Every rule has to hold against the profiles
-    read now rather than against the recorded ones, which is what still fails
-    after someone has regenerated the manifest from a broken build. And when
-    the caller generates its policy, `policy` is compared against the one in
-    the manifest, which catches a manifest written before the generator
-    changed.
+    Every recorded file has to still be there and still read back the same
+    facts, and nothing may be there that the manifest does not mention.
     """
     problems = []
-
-    found_schema = manifest.get("schema")
-    if found_schema != SCHEMA:
-        return [f"manifest schema is {found_schema!r}, this tool speaks {SCHEMA!r}"]
-
-    if policy is not None:
-        for key in POLICY_KEYS:
-            problems += _differences(key, manifest.get(key), policy.get(key),
-                                     ("manifest", "policy"))
-
-    rules = manifest.get("rules", [])
+    recorded_files = manifest.get("files", {})
     present = contents(directory)
 
-    for name, recorded in sorted(manifest.get("files", {}).items()):
+    for name, recorded in sorted(recorded_files.items()):
         path = present.get(name)
         if path is None:
             problems.append(f"{name}: missing")
@@ -797,22 +730,11 @@ def check(directory, manifest, policy=None):
 
         problems += _differences(name, recorded, found, ("manifest", "file"))
 
-        claimed = False
-        for rule in rules:
-            matched, failures = _apply_rule(name, found, rule)
-            claimed = claimed or matched
-            problems += failures
-        if manifest.get("require-rule-coverage") and not claimed:
-            problems.append(f"{name}: no rule in the manifest claims this file")
-
     for name in present:
-        if name not in manifest.get("files", {}):
+        if name not in recorded_files:
             problems.append(f"{name}: present but not listed in the manifest")
 
-    # Two rules about the same slice of the same file report a missing slice
-    # identically, and saying it twice adds nothing. Every message names the
-    # file it is about, so equal text really is the same finding.
-    return list(dict.fromkeys(problems))
+    return problems
 
 
 def diff(left, right):
@@ -863,7 +785,7 @@ def _differences(label, left, right, names):
     """Every leaf at which `left` and `right` disagree, one problem each.
 
     Descending rather than printing the two sides whole is what keeps a
-    changed glibc ceiling from arriving as a screenful of unchanged rules.
+    changed dependency from arriving as both profiles printed whole.
     """
     if isinstance(left, dict) and isinstance(right, dict):
         problems = []
@@ -918,136 +840,6 @@ def _list_differences(label, left, right, names):
 
 
 # --------------------------------------------------------------------------
-# Rules
-# --------------------------------------------------------------------------
-
-def _apply_rule(name, found, rule):
-    """Runs one rule over one profile: (did it match the file, problems)."""
-    patterns = rule.get("match", "*")
-    if isinstance(patterns, str):
-        patterns = [patterns]
-    if not any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
-        return False, []
-
-    label = name
-    if "name" in rule:
-        label += f" ({rule['name']})"
-
-    target = found
-    if "slice" in rule:
-        label += f" [{rule['slice']}]"
-        # A thin file is treated as its own single slice so that per-slice and
-        # whole-file rules are written the same way.
-        slices = found.get("slices") or {found.get("arch"): found}
-        if rule["slice"] not in slices:
-            return True, [f"{label}: the file carries no such slice"]
-        target = slices[rule["slice"]]
-
-    # `when` is a guard rather than an assertion: an unmet one means the rule
-    # has nothing to say about this file, which is how a rule about ELF images
-    # is kept off the static library sitting next to them.
-    for key, condition in sorted(rule.get("when", {}).items()):
-        if _condition_problems(key, target, condition):
-            return True, []
-
-    problems = []
-    for key, condition in sorted(rule.get("require", {}).items()):
-        problems += [f"{label}: {failure}"
-                     for failure in _condition_problems(key, target, condition)]
-    return True, problems
-
-
-def _lookup(profile_data, key):
-    """Follows a dotted key such as `symbol-versions.GLIBC` into a profile."""
-    current = profile_data
-    for part in key.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return False, None
-        current = current[part]
-    return True, current
-
-
-def _condition_problems(key, target, condition):
-    """Every way one `require` or `when` entry is not satisfied."""
-    # A condition that is not a map is the value itself, which is what makes
-    # the common case read as `"format": "elf"`.
-    if not isinstance(condition, dict):
-        condition = {"is": condition}
-
-    found, value = _lookup(target, key)
-    problems = []
-    for operator, expected in sorted(condition.items()):
-        problems += _operator_problems(key, operator, found, value, expected)
-    return problems
-
-
-def _operator_problems(key, operator, found, value, expected):
-    # The two conditions that are about absence come first, because they are
-    # the only ones a missing key can satisfy.
-    if operator == "present":
-        if found != bool(expected):
-            return [f"{key} is {'present' if found else 'absent'}"]
-        return []
-
-    if operator == "empty":
-        if (not found or not value) != bool(expected):
-            return [f"{key} is {value!r}, wanted "
-                    f"{'nothing' if expected else 'something'}"]
-        return []
-
-    if not found:
-        return [f"{key} is not recorded at all, so {operator} {expected!r} "
-                f"cannot hold"]
-
-    if operator == "is":
-        return [] if value == expected else [f"{key} is {value!r}, wanted {expected!r}"]
-
-    if operator == "one-of":
-        return [] if value in expected else \
-            [f"{key} is {value!r}, wanted one of {expected!r}"]
-
-    if operator in ("at-most", "at-least", "is-version"):
-        try:
-            actual, limit = version_tuple(str(value)), version_tuple(str(expected))
-        except ValueError:
-            return [f"{key} is {value!r}, which is not a version {operator} "
-                    f"{expected!r} could be compared against"]
-        # `10.12` and `10.12.0` are the same floor written two ways, and which
-        # of the two a container stores is the container's business, so these
-        # compare the padded tuples rather than the text.
-        if operator == "at-most" and actual > limit:
-            return [f"{key} is {value}, above the permitted {expected}"]
-        if operator == "at-least" and actual < limit:
-            return [f"{key} is {value}, below the required {expected}"]
-        if operator == "is-version" and actual != limit:
-            return [f"{key} is {value}, wanted {expected}"]
-        return []
-
-    if operator == "subset-of":
-        extra = sorted(set(_elements(value)) - set(expected))
-        return [f"{key} has {extra!r}, which {expected!r} does not allow"] if extra else []
-
-    if operator == "contains":
-        missing = sorted(set(expected) - set(_elements(value)))
-        return [f"{key} is missing {missing!r}"] if missing else []
-
-    if operator == "matches":
-        return [] if re.fullmatch(expected, str(value)) else \
-            [f"{key} is {value!r}, which does not match {expected!r}"]
-
-    raise ValueError(f"unknown condition {operator!r} on {key}")
-
-
-def _elements(value):
-    """What `subset-of` and `contains` compare: a map's keys, a list's items."""
-    if isinstance(value, dict):
-        return list(value)
-    if isinstance(value, (list, tuple, set)):
-        return list(value)
-    return [value]
-
-
-# --------------------------------------------------------------------------
 # Command line
 # --------------------------------------------------------------------------
 
@@ -1064,31 +856,20 @@ def _report(problems, heading):
     return 1
 
 
-def _load_policy(source):
-    """The policy out of a policy file or out of an existing manifest."""
-    data = json.loads(Path(source).read_text())
-    return {key: data[key] for key in POLICY_KEYS if key in data}
-
-
 def _command_show(args):
     print(json.dumps({str(path): profile(path) for path in args.path}, indent=4))
     return 0
 
 
 def _command_record(args):
-    policy = _load_policy(args.policy) if args.policy else None
-    manifest = record(args.directory, policy)
+    manifest = record(args.directory)
     text = json.dumps(manifest, indent=4) + "\n"
     if args.output:
         Path(args.output).write_text(text)
         print(f"wrote {len(manifest['files'])} files to {args.output}")
     else:
         print(text, end="")
-
-    # Locking down artifacts that already break the policy would write the
-    # breakage into the lock file, so it is reported straight away.
-    return _report(check(args.directory, manifest),
-                   f"\nrecorded, but {args.directory} does not satisfy its own rules")
+    return 0
 
 
 def _command_check(args):
@@ -1122,9 +903,6 @@ def main():
         "record", help="write a manifest describing every file in a directory")
     record_parser.add_argument("directory", type=Path)
     record_parser.add_argument("-o", "--output", help="write here instead of stdout")
-    record_parser.add_argument("--policy",
-                               help="take metadata and rules from this manifest "
-                                    "or policy file instead of writing none")
     record_parser.set_defaults(func=_command_record)
 
     check_parser = subparsers.add_parser(

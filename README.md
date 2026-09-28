@@ -44,6 +44,7 @@ installs into `build/<platform>-<config>/install/`.
 | `cmake/Dependencies.cmake`| Fetches Boost and shares one checkout across all platforms    |
 | `dev.py`                  | Thin cross-platform wrapper around the CMake commands         |
 | `tools/dist-manifest.py`  | Standalone lock-file tool for binaries: reads ELF, PE and Mach-O |
+| `tools/universal.py`      | Standalone `lipo -create`: combines thin macOS files into one |
 | `dist-manifest.json`      | The lock file it keeps for this project's distribution        |
 
 `src/` produces two things:
@@ -196,8 +197,8 @@ section of `cmake/targets.json` says which platform builds get folded together:
 ```
 
 Those platforms are still built separately, they are just not copied out on
-their own. Assembling the container is `tools/dist-manifest.py fuse` rather
-than `lipo`, because `lipo` only exists on macOS and this has to work on every
+their own. Assembling the container is `tools/universal.py` rather than
+`lipo`, because `lipo` only exists on macOS and this has to work on every
 host. It handles static libraries too, which Apple wraps in the same format.
 
 It then verifies the result against `dist-manifest.json` and fails if anything
@@ -218,7 +219,6 @@ tools/dist-manifest.py show   <path>...       what these files depend on
 tools/dist-manifest.py record <dir>  -o FILE  lock a directory down
 tools/dist-manifest.py check  <dir>  -m FILE  assert it still matches
 tools/dist-manifest.py diff   <a> <b>         compare two of anything
-tools/dist-manifest.py fuse   <out> <in>...   build a universal binary
 ```
 
 `diff` takes a manifest, a directory or a single binary on either side, so a

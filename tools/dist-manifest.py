@@ -8,17 +8,18 @@ it needs, the minimum OS it declares. Regenerating it turns "the build
 changed" into a reviewable diff instead of a bug report from whoever has the
 oldest machine.
 
-Nothing here knows about any particular project. The five subcommands are:
+Nothing here knows about any particular project, and nothing here writes a
+binary; the four subcommands only ever read one. Assembling a universal file
+is the one job that goes the other way, and it lives in tools/universal.py.
 
     dist-manifest.py show   <path>...            what these files depend on
     dist-manifest.py record <dir>  -o FILE       lock a directory down
     dist-manifest.py check  <dir>  -m FILE       assert it still matches
     dist-manifest.py diff   <a> <b>              compare two of anything
-    dist-manifest.py fuse   <out> <in>...        build a universal binary
 
-and `record()`, `check()`, `diff()`, `profile()` and `write_universal()` are
-importable under the same names by a build script that would rather generate
-its policy than hand-write it.
+and `record()`, `check()`, `diff()` and `profile()` are importable under the
+same names by a build script that would rather generate its policy than
+hand-write it.
 
 Reading the formats
 -------------------
@@ -521,58 +522,6 @@ def _fat(data):
         "arch": sorted(slices),
         "slices": dict(sorted(slices.items())),
     }
-
-
-# Slices start on a 2**14 boundary. That is what arm64 requires and what
-# Apple's own tooling uses there; over-aligning the x86-64 slice too costs a
-# few kilobytes of padding and saves the writer from having to care.
-_FAT_ALIGNMENT = 14
-
-
-def write_universal(sources, destination):
-    """Assembles thin Mach-O images, or thin archives, into one universal file.
-
-    The `lipo -create` half of the format, done here because the macOS
-    artifact has to be built on hosts where lipo does not exist.
-    """
-    bodies = [Path(source).read_bytes() for source in sources]
-
-    entries = []
-    offset = 8 + 20 * len(bodies)
-    for body in bodies:
-        offset = (offset + (1 << _FAT_ALIGNMENT) - 1) & ~((1 << _FAT_ALIGNMENT) - 1)
-        cpu_type, cpu_subtype = _slice_cpu(body)
-        entries.append((cpu_type, cpu_subtype, offset, len(body), _FAT_ALIGNMENT))
-        offset += len(body)
-
-    # The 32 bit header keeps offsets and sizes in four bytes each, and the 64
-    # bit one is only worth reaching for if that is not enough, which for these
-    # artifacts it always is.
-    if offset > 0xFFFFFFFF:
-        raise UnknownFormat("slices do not fit in a 32 bit universal binary")
-
-    # FAT_MAGIC, slice count, then one 20 byte record per slice.
-    out = bytearray(struct.pack(">II", 0xCAFEBABE, len(bodies)))
-    for entry in entries:
-        out += struct.pack(">iIIII", *entry)
-    for entry, body in zip(entries, bodies):
-        out += b"\0" * (entry[2] - len(out))
-        out += body
-
-    Path(destination).write_bytes(bytes(out))
-
-
-def _slice_cpu(body):
-    """The (cputype, cpusubtype) pair a universal header records for a slice."""
-    if body[:4] in _MACHO_MAGIC:
-        return struct.unpack_from(_macho_order(body[:4]) + "iI", body, 4)
-
-    if body[:8] == b"!<arch>\n":
-        for member in _archive_members(body):
-            if member[:4] in _MACHO_MAGIC:
-                return struct.unpack_from(_macho_order(member[:4]) + "iI", member, 4)
-
-    raise UnknownFormat("slice is neither a Mach-O image nor an archive of them")
 
 
 def _macho_arch(cpu_type, cpu_subtype):
@@ -1160,12 +1109,6 @@ def _command_diff(args):
     return 0
 
 
-def _command_fuse(args):
-    write_universal(args.input, args.output)
-    print(json.dumps(profile(args.output), indent=4))
-    return 0
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1195,12 +1138,6 @@ def main():
     diff_parser.add_argument("left")
     diff_parser.add_argument("right")
     diff_parser.set_defaults(func=_command_diff)
-
-    fuse = subparsers.add_parser(
-        "fuse", help="combine thin Mach-O images or archives into a universal file")
-    fuse.add_argument("output")
-    fuse.add_argument("input", nargs="+")
-    fuse.set_defaults(func=_command_fuse)
 
     args = parser.parse_args()
     try:

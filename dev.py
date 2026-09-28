@@ -47,9 +47,11 @@ def load_tool(file_name):
     return module
 
 
-# Everything this script knows about reading binaries. It is a general tool:
-# what makes it check *our* artifacts is the policy generated below.
+# Both are general tools that know nothing about this project: one reads
+# binaries and locks down what they depend on, the other writes the universal
+# macOS container.
 dist_manifest = load_tool("dist-manifest.py")
+universal = load_tool("universal.py")
 
 # The one place the platforms are spelled out is cmake/targets.json, which the
 # toolchain file reads as well.
@@ -407,8 +409,8 @@ def collect_universal(name, members, config):
                      f"{len(sources)} of the {len(members)} {name} platforms")
 
         destination = DIST_DIR / dist_name(Path(file_name), name)
-        dist_manifest.write_universal(sources, destination)
-        # write_universal only writes bytes; an executable has to stay one.
+        universal.write(sources, destination)
+        # The writer only writes bytes; an executable has to stay one.
         shutil.copymode(sources[0], destination)
         print(f"  {destination.relative_to(ROOT)}", flush=True)
 

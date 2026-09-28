@@ -79,6 +79,29 @@ of those triples are deliberate choices rather than defaults:
   this for a cross target, but it is stated explicitly because it is the one
   compatibility property that cannot be verified after the fact.
 
+`win-64` additionally carries `"link-flags": "-lucrtbase"`. See below for why.
+
+### The Windows C runtime
+
+The Windows binary imports `KERNEL32.dll` and `ucrtbase.dll`, and that is as
+small as the list gets. It cannot be reduced to nothing, because `ucrtbase.dll`
+*is* the C runtime: zig's `windows-gnu` target is mingw-w64, which wraps the
+UCRT rather than replacing it, and no static UCRT exists for it. `libucrt.a` in
+zig's tree is not one, despite the name; it is mingw's supplement of long
+double and complex math routines. `-static` leaves the import table untouched,
+and `x86_64-windows-msvc` is not available at all (`unable to provide libc for
+target`).
+
+What `-lucrtbase` does buy is resolving the runtime against `ucrtbase.dll`
+directly rather than against the dozen `api-ms-win-crt-*.dll` entries, which
+are only forwarders to that same library. Twelve import table entries become
+two, and the set of Windows versions the binary runs on does not change: both
+forms live in System32 from Windows 10 on, and on 8.1 and earlier both arrive
+together with the UCRT update. The one caveat is that Microsoft documents the
+API sets as the supported contract, so importing `ucrtbase.dll` directly,
+while common and working, sits outside that. Deleting the `link-flags` entry
+from `cmake/targets.json` reverts to the API sets.
+
 Editing a triple discards the affected build directory automatically. The
 triple lives inside the generated compiler shims rather than in the compile
 command lines, so ninja cannot see it change and would otherwise happily
@@ -107,7 +130,7 @@ file that was collected.
 ```json
 {
     "cpu": "baseline",
-    "triples": { "linux-64": "x86_64-linux-gnu.2.28", "...": "..." },
+    "targets": { "linux-64": { "triple": "x86_64-linux-gnu.2.28", "...": "..." } },
     "files": {
         "crosszig-linux-64": {
             "platform": "linux-64",
@@ -143,7 +166,7 @@ which of libc, libm or libpthread pulled it in.
 `dist-check` then asserts three separate things:
 
 1. **The build inputs still match `cmake/targets.json`.** Retargeting a
-   platform cannot go unnoticed.
+   platform, or changing its link flags, cannot go unnoticed.
 2. **Every file is present and reads back exactly its recorded profile.** Any
    file in the directory that the manifest does not mention is reported too.
 3. **Every profile satisfies the invariants implied by its zig triple.** This

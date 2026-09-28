@@ -112,14 +112,15 @@ def install_dir(target, config):
 def build_one(target, config, jobs=None, clean=False):
     """Configure, build and install a single target platform."""
     output = build_dir(target, config)
-    cpu, triples = toolchain_targets()
+    cpu, platforms = toolchain_targets()
     stamp = output / ".crosszig-build-inputs"
-    inputs = f"{triples[target]} -mcpu={cpu}\n"
+    inputs = json.dumps({"cpu": cpu, **platforms[target]}, sort_keys=True) + "\n"
 
-    # The target triple is baked into the generated compiler shims rather than
-    # into the compile command lines, so ninja cannot see it change and would
-    # report "no work to do" against the old artifacts. Editing targets.json
-    # therefore has to discard the build directory.
+    # The target triple and the link flags are baked into the generated
+    # compiler shims and into the cache rather than into the compile command
+    # lines, so ninja cannot see them change and would report "no work to do"
+    # against the old artifacts. Editing targets.json therefore has to discard
+    # the build directory.
     if stamp.is_file() and stamp.read_text() != inputs:
         print(f"build inputs changed, discarding {output}", flush=True)
         clean = True
@@ -151,9 +152,14 @@ def build_one(target, config, jobs=None, clean=False):
 
 
 def toolchain_targets():
-    """The build inputs the toolchain uses, as recorded in cmake/targets.json."""
+    """The build inputs the toolchain uses, as recorded in cmake/targets.json.
+
+    The whole platform entry is carried around rather than just the triple, so
+    that anything added there later lands in the manifest without this having
+    to learn about it.
+    """
     data = json.loads(TARGETS.read_text())
-    return data["cpu"], {name: entry["triple"] for name, entry in data["platforms"].items()}
+    return data["cpu"], data["platforms"]
 
 
 def platform_of(name):
@@ -177,10 +183,10 @@ def file_profile(path):
 
 def build_manifest(directory):
     """Describes `directory` the way dist-manifest.json records it."""
-    cpu, triples = toolchain_targets()
+    cpu, platforms = toolchain_targets()
     return {
         "cpu": cpu,
-        "triples": dict(sorted(triples.items())),
+        "targets": dict(sorted(platforms.items())),
         "files": {
             path.name: file_profile(path)
             for path in sorted(directory.iterdir())
@@ -259,17 +265,17 @@ def check_dist(directory):
         sys.exit(f"dev.py: no manifest at {MANIFEST}")
 
     manifest = json.loads(MANIFEST.read_text())
-    cpu, triples = toolchain_targets()
+    cpu, platforms = toolchain_targets()
     problems = []
 
     if manifest["cpu"] != cpu:
         problems.append(
             f"manifest builds for cpu {manifest['cpu']}, but {TARGETS.name} says {cpu}")
-    for platform_name in sorted(set(manifest["triples"]) | set(triples)):
-        recorded = manifest["triples"].get(platform_name)
-        actual = triples.get(platform_name)
+    for platform_name in sorted(set(manifest["targets"]) | set(platforms)):
+        recorded = manifest["targets"].get(platform_name)
+        actual = platforms.get(platform_name)
         if recorded != actual:
-            problems.append(f"triple for {platform_name}: manifest has {recorded}, "
+            problems.append(f"build inputs for {platform_name}: manifest has {recorded}, "
                             f"{TARGETS.name} has {actual}")
 
     for name, recorded in sorted(manifest["files"].items()):
@@ -284,8 +290,9 @@ def check_dist(directory):
             problems.append(f"{name}: {error}")
             continue
 
+        target = platforms.get(found.get("platform")) or {}
         problems += compare_profile(name, recorded, found)
-        problems += check_invariants(name, found, triples.get(found.get("platform")))
+        problems += check_invariants(name, found, target.get("triple"))
 
     for path in sorted(directory.iterdir()):
         if path.is_file() and path.name not in manifest["files"]:

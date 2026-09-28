@@ -44,6 +44,16 @@ string(JSON _crosszig_triple GET "${_crosszig_platform}" "triple")
 # used, so there would be nothing left to check afterwards.
 string(JSON _crosszig_cpu GET "${_crosszig_targets}" "cpu")
 
+# Optional per-platform link flags. win-64 uses this to resolve the C runtime
+# against ucrtbase.dll directly instead of against the api-ms-win-crt-*
+# forwarders that all point at it anyway, which turns a dozen import table
+# entries into one without changing which Windows versions the binary runs on.
+string(JSON _crosszig_link_flags ERROR_VARIABLE _crosszig_json_error
+       GET "${_crosszig_platform}" "link-flags")
+if(NOT _crosszig_json_error STREQUAL "NOTFOUND")
+    set(_crosszig_link_flags "")
+endif()
+
 find_program(CROSSZIG_ZIG_EXECUTABLE NAMES zig REQUIRED
              DOC "zig compiler used as the cross toolchain")
 
@@ -125,6 +135,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
                " -L${_crosszig_zig_lib_dir}/libc/darwin")
     endforeach()
 endif()
+
+foreach(_crosszig_kind EXE SHARED MODULE)
+    string(APPEND CMAKE_${_crosszig_kind}_LINKER_FLAGS_INIT " ${_crosszig_link_flags}")
+endforeach()
 
 # There is no target sysroot on disk - zig resolves the target headers and
 # libraries internally. Pointing CMAKE_FIND_ROOT_PATH at an empty directory

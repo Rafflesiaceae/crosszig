@@ -57,14 +57,21 @@ TOOLCHAIN_COMMANDS = {"build", "run"}
 
 
 def host_platform():
-    """The pixi platform name this script is currently running on."""
+    """The target platform matching the machine this script is running on."""
     system = platform.system()
+    machine = platform.machine().lower()
+    arm = machine in ("arm64", "aarch64")
+
     if system == "Linux":
-        return "linux-64"
+        if arm:
+            return "linux-aarch64"
+        return "linux-32" if machine in ("i386", "i486", "i586", "i686") else "linux-64"
     if system == "Windows":
-        return "win-64-msvc"
+        # A 32 bit Python can be running on a 64 bit Windows, so this follows
+        # the reported machine rather than the interpreter.
+        return "win-32-msvc" if machine in ("x86", "i386", "i686") else "win-64-msvc"
     if system == "Darwin":
-        return "osx-arm64" if platform.machine().lower() in ("arm64", "aarch64") else "osx-64"
+        return "osx-arm64" if arm else "osx-64"
     sys.exit(f"dev.py: unsupported host system '{system}'")
 
 

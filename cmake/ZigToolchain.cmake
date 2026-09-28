@@ -75,8 +75,15 @@ set(CROSSZIG_CXX_STANDARD "${_crosszig_cxx_standard}" CACHE STRING
 set(_crosszig_zig_libc "")
 if(_crosszig_sdk STREQUAL "xwin")
     find_program(CROSSZIG_PYTHON NAMES python3 python REQUIRED)
+
+    # The SDK is unpacked once per architecture and xwin names those the way
+    # the leading component of a zig triple does, so the triple is all the
+    # toolchain has to pass on.
+    string(REGEX MATCH "^[^-]+" _crosszig_sdk_arch "${_crosszig_triple}")
+
     execute_process(
-        COMMAND "${CROSSZIG_PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/../tools/xwin.py" paths
+        COMMAND "${CROSSZIG_PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/../tools/xwin.py"
+                paths --arch "${_crosszig_sdk_arch}"
         OUTPUT_VARIABLE _crosszig_xwin
         ERROR_VARIABLE _crosszig_xwin_error
         RESULT_VARIABLE _crosszig_xwin_result

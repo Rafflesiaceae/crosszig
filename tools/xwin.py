@@ -14,7 +14,7 @@ This script drives it: it pins the xwin release, verifies its checksum, unpacks
 the SDK once into the shared cache, and writes out the paths the build needs.
 
     python tools/xwin.py setup --accept-license
-    python tools/xwin.py paths
+    python tools/xwin.py paths --arch x86_64
     python tools/xwin.py clean
 
 Everything here is standard library only and independent of the rest of the
@@ -52,9 +52,10 @@ ASSETS = {
         "96e83665ef5c1406aabd0be603a8d08e67e604f36fda630b6807ee948a614e26"),
 }
 
-# The architecture to fetch Microsoft's packages for. Only the one the build
-# actually targets is downloaded; the full set is several times the size.
-TARGET_ARCH = "x86_64"
+# The architectures to fetch Microsoft's packages for, named the way both xwin
+# and the splat layout name them. Only the ones something is actually built
+# for are downloaded; the full set is larger again.
+TARGET_ARCHES = ("x86_64", "x86")
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / ".cache" / "xwin"
@@ -125,14 +126,19 @@ def fetch_tool():
     return binary
 
 
-def sdk_paths():
-    """Where the unpacked SDK lives and what the compiler needs from it."""
+def sdk_paths(arch):
+    """Where the unpacked SDK lives and what the compiler needs from it.
+
+    The headers are shared between architectures; only the libraries, and so
+    the libc file pointing at them, are per architecture.
+    """
     sdk = CACHE / "sdk"
     return {
+        "arch": arch,
         "root": str(sdk),
         # zig refuses to target the MSVC ABI unless it is told where the CRT
         # is; ZIG_LIBC pointing at this file is how that is done for `zig cc`.
-        "zig-libc": str(CACHE / "zig-libc.txt"),
+        "zig-libc": str(CACHE / f"zig-libc-{arch}.txt"),
         # The libc file above covers the CRT and ucrt headers. The Win32
         # headers are not part of it and have to be added separately.
         "include": [str(sdk / "sdk" / "include" / "um"),
@@ -142,53 +148,62 @@ def sdk_paths():
 
 def write_libc_file(paths):
     sdk = Path(paths["root"])
+    arch = paths["arch"]
     Path(paths["zig-libc"]).write_text(
         f"include_dir={sdk / 'sdk' / 'include' / 'ucrt'}\n"
         f"sys_include_dir={sdk / 'crt' / 'include'}\n"
-        f"crt_dir={sdk / 'sdk' / 'lib' / 'ucrt' / TARGET_ARCH}\n"
-        f"msvc_lib_dir={sdk / 'crt' / 'lib' / TARGET_ARCH}\n"
-        f"kernel32_lib_dir={sdk / 'sdk' / 'lib' / 'um' / TARGET_ARCH}\n"
+        f"crt_dir={sdk / 'sdk' / 'lib' / 'ucrt' / arch}\n"
+        f"msvc_lib_dir={sdk / 'crt' / 'lib' / arch}\n"
+        f"kernel32_lib_dir={sdk / 'sdk' / 'lib' / 'um' / arch}\n"
         f"gcc_dir=\n")
 
 
 def is_ready():
-    paths = sdk_paths()
-    return (Path(paths["root"], "crt", "lib", TARGET_ARCH).is_dir()
-            and Path(paths["zig-libc"]).is_file())
+    """True once every architecture we build for is unpacked and described."""
+    return all(Path(sdk_paths(arch)["root"], "crt", "lib", arch).is_dir()
+               and Path(sdk_paths(arch)["zig-libc"]).is_file()
+               for arch in TARGET_ARCHES)
 
 
 def command_setup(args):
     if is_ready() and not args.force:
         print(f"already set up in {CACHE}")
-        print(json.dumps(sdk_paths(), indent=4))
+        print(json.dumps([sdk_paths(arch) for arch in TARGET_ARCHES], indent=4))
         return
 
     if not (args.accept_license or os.environ.get("XWIN_ACCEPT_LICENSE")):
         sys.exit(LICENSE_NOTICE)
 
     tool = fetch_tool()
-    paths = sdk_paths()
-    shutil.rmtree(paths["root"], ignore_errors=True)
+    root = sdk_paths(TARGET_ARCHES[0])["root"]
+    shutil.rmtree(root, ignore_errors=True)
+
+    # One splat for all architectures: they share the headers, and unpacking
+    # them one at a time would only overwrite the same tree repeatedly.
+    architectures = []
+    for arch in TARGET_ARCHES:
+        architectures += ["--arch", arch]
 
     subprocess.run([
         str(tool),
         "--accept-license",
-        "--arch", TARGET_ARCH,
+        *architectures,
         # xwin's own download cache, kept so that a repeat run is offline.
         "--cache-dir", str(CACHE / "download"),
         "splat",
-        "--output", paths["root"],
+        "--output", root,
     ], check=True)
 
-    write_libc_file(paths)
-    print(json.dumps(paths, indent=4))
+    for arch in TARGET_ARCHES:
+        write_libc_file(sdk_paths(arch))
+    print(json.dumps([sdk_paths(arch) for arch in TARGET_ARCHES], indent=4))
 
 
-def command_paths(_args):
+def command_paths(args):
     if not is_ready():
         sys.exit("xwin.py: not set up. "
                  "Run `python tools/xwin.py setup --accept-license` first.")
-    print(json.dumps(sdk_paths()))
+    print(json.dumps(sdk_paths(args.arch)))
 
 
 def command_clean(_args):
@@ -209,6 +224,8 @@ def main():
     setup.set_defaults(func=command_setup)
 
     paths = subparsers.add_parser("paths", help="print the cached SDK paths as JSON")
+    paths.add_argument("--arch", choices=TARGET_ARCHES, default=TARGET_ARCHES[0],
+                       help="which architecture's libraries to point at")
     paths.set_defaults(func=command_paths)
 
     clean = subparsers.add_parser("clean", help="delete the cached SDK and downloads")

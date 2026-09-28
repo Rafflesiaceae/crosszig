@@ -1,10 +1,20 @@
 {
     "cpu": "baseline",
     "targets": {
+        "linux-32": {
+            "system": "Linux",
+            "processor": "i686",
+            "triple": "x86-linux-gnu.2.3.3"
+        },
         "linux-64": {
             "system": "Linux",
             "processor": "x86_64",
             "triple": "x86_64-linux-gnu.2.3.3"
+        },
+        "linux-aarch64": {
+            "system": "Linux",
+            "processor": "aarch64",
+            "triple": "aarch64-linux-gnu.2.17"
         },
         "osx-64": {
             "system": "Darwin",
@@ -15,6 +25,15 @@
             "system": "Darwin",
             "processor": "arm64",
             "triple": "aarch64-macos.11.0-none"
+        },
+        "win-32-msvc": {
+            "system": "Windows",
+            "processor": "x86",
+            "triple": "x86-windows-msvc",
+            "sdk": "xwin",
+            "cxx-standard": 14,
+            "cxx-driver": "cc",
+            "compile-flags": "-Wno-unused-command-line-argument"
         },
         "win-64-msvc": {
             "system": "Windows",
@@ -33,6 +52,27 @@
         ]
     },
     "files": {
+        "crosszig-linux-32": {
+            "platform": "linux-32",
+            "format": "elf",
+            "arch": "x86",
+            "needs": [
+                "ld-linux.so.2",
+                "libc.so.6",
+                "libdl.so.2",
+                "libm.so.6",
+                "libpthread.so.0",
+                "libresolv.so.2",
+                "librt.so.1",
+                "libutil.so.1"
+            ],
+            "symbol-versions": {
+                "GLIBC": "2.3.2"
+            },
+            "runpath": [],
+            "interpreter": "/lib/ld-linux.so.2",
+            "min-kernel": "2.0.0"
+        },
         "crosszig-linux-64": {
             "platform": "linux-64",
             "format": "elf",
@@ -52,6 +92,27 @@
             },
             "runpath": [],
             "interpreter": "/lib64/ld-linux-x86-64.so.2",
+            "min-kernel": "2.0.0"
+        },
+        "crosszig-linux-aarch64": {
+            "platform": "linux-aarch64",
+            "format": "elf",
+            "arch": "arm64",
+            "needs": [
+                "ld-linux-aarch64.so.1",
+                "libc.so.6",
+                "libdl.so.2",
+                "libm.so.6",
+                "libpthread.so.0",
+                "libresolv.so.2",
+                "librt.so.1",
+                "libutil.so.1"
+            ],
+            "symbol-versions": {
+                "GLIBC": "2.17"
+            },
+            "runpath": [],
+            "interpreter": "/lib/ld-linux-aarch64.so.1",
             "min-kernel": "2.0.0"
         },
         "crosszig-osx-universal": {
@@ -89,6 +150,150 @@
                     "macos-min": "10.12.0"
                 }
             }
+        },
+        "crosszig-win-32-msvc.exe": {
+            "platform": "win-32-msvc",
+            "format": "pe",
+            "arch": "x86",
+            "needs": [
+                "KERNEL32.dll",
+                "USER32.dll"
+            ],
+            "imports": {
+                "KERNEL32.dll": [
+                    "AcquireSRWLockExclusive",
+                    "CloseHandle",
+                    "CloseThreadpoolTimer",
+                    "CloseThreadpoolWait",
+                    "CompareStringEx",
+                    "CompareStringW",
+                    "CreateEventExW",
+                    "CreateFileW",
+                    "CreateSemaphoreExW",
+                    "CreateSymbolicLinkW",
+                    "CreateThread",
+                    "CreateThreadpoolTimer",
+                    "CreateThreadpoolWait",
+                    "DecodePointer",
+                    "DeleteCriticalSection",
+                    "EncodePointer",
+                    "EnterCriticalSection",
+                    "EnumSystemLocalesW",
+                    "ExitProcess",
+                    "FindClose",
+                    "FindFirstFileExA",
+                    "FindFirstFileExW",
+                    "FindNextFileA",
+                    "FindNextFileW",
+                    "FlushFileBuffers",
+                    "FlushProcessWriteBuffers",
+                    "FormatMessageA",
+                    "FreeEnvironmentStringsW",
+                    "FreeLibrary",
+                    "FreeLibraryWhenCallbackReturns",
+                    "GetACP",
+                    "GetCPInfo",
+                    "GetCommandLineA",
+                    "GetCommandLineW",
+                    "GetConsoleCP",
+                    "GetConsoleMode",
+                    "GetCurrentProcess",
+                    "GetCurrentProcessId",
+                    "GetCurrentProcessorNumber",
+                    "GetCurrentThread",
+                    "GetCurrentThreadId",
+                    "GetDateFormatW",
+                    "GetEnvironmentStringsW",
+                    "GetFileInformationByHandleEx",
+                    "GetFileType",
+                    "GetLastError",
+                    "GetLocaleInfoEx",
+                    "GetLocaleInfoW",
+                    "GetModuleFileNameA",
+                    "GetModuleFileNameW",
+                    "GetModuleHandleExW",
+                    "GetModuleHandleW",
+                    "GetOEMCP",
+                    "GetProcAddress",
+                    "GetProcessHeap",
+                    "GetStartupInfoW",
+                    "GetStdHandle",
+                    "GetStringTypeExA",
+                    "GetStringTypeW",
+                    "GetSystemTimeAsFileTime",
+                    "GetTempPathW",
+                    "GetTickCount64",
+                    "GetTimeFormatW",
+                    "GetTimeZoneInformation",
+                    "GetUserDefaultLCID",
+                    "HeapAlloc",
+                    "HeapFree",
+                    "HeapReAlloc",
+                    "HeapSize",
+                    "InitOnceExecuteOnce",
+                    "InitializeCriticalSectionAndSpinCount",
+                    "InitializeCriticalSectionEx",
+                    "InitializeSListHead",
+                    "InterlockedFlushSList",
+                    "InterlockedPushEntrySList",
+                    "IsDebuggerPresent",
+                    "IsProcessorFeaturePresent",
+                    "IsValidCodePage",
+                    "IsValidLocale",
+                    "LCMapStringA",
+                    "LCMapStringEx",
+                    "LCMapStringW",
+                    "LeaveCriticalSection",
+                    "LoadLibraryA",
+                    "LoadLibraryExW",
+                    "LocalFree",
+                    "MultiByteToWideChar",
+                    "OutputDebugStringA",
+                    "OutputDebugStringW",
+                    "QueryPerformanceCounter",
+                    "QueryPerformanceFrequency",
+                    "RaiseException",
+                    "ReadConsoleW",
+                    "ReadFile",
+                    "ReleaseSRWLockExclusive",
+                    "RtlUnwind",
+                    "SetConsoleCtrlHandler",
+                    "SetEnvironmentVariableA",
+                    "SetEnvironmentVariableW",
+                    "SetFileInformationByHandle",
+                    "SetFilePointerEx",
+                    "SetLastError",
+                    "SetStdHandle",
+                    "SetThreadpoolTimer",
+                    "SetThreadpoolWait",
+                    "SetUnhandledExceptionFilter",
+                    "SleepConditionVariableSRW",
+                    "TerminateProcess",
+                    "TlsAlloc",
+                    "TlsFree",
+                    "TlsGetValue",
+                    "TlsSetValue",
+                    "TryAcquireSRWLockExclusive",
+                    "UnhandledExceptionFilter",
+                    "WaitForSingleObjectEx",
+                    "WaitForThreadpoolTimerCallbacks",
+                    "WakeAllConditionVariable",
+                    "WideCharToMultiByte",
+                    "WriteConsoleW",
+                    "WriteFile"
+                ],
+                "USER32.dll": [
+                    "LoadStringA"
+                ]
+            },
+            "min-os": "6.0",
+            "subsystem-version": "6.0"
+        },
+        "crosszig-win-32-msvc.lib": {
+            "platform": "win-32-msvc",
+            "format": "archive",
+            "arch": "x86",
+            "cxx-runtime": "msvc-stl"
         },
         "crosszig-win-64-msvc.exe": {
             "platform": "win-64-msvc",
@@ -239,10 +444,22 @@
             "arch": "x86-64",
             "cxx-runtime": "msvc-stl"
         },
+        "libcrosszig-linux-32.a": {
+            "platform": "linux-32",
+            "format": "archive",
+            "arch": "x86",
+            "cxx-runtime": "libc++"
+        },
         "libcrosszig-linux-64.a": {
             "platform": "linux-64",
             "format": "archive",
             "arch": "x86-64",
+            "cxx-runtime": "libc++"
+        },
+        "libcrosszig-linux-aarch64.a": {
+            "platform": "linux-aarch64",
+            "format": "archive",
+            "arch": "arm64",
             "cxx-runtime": "libc++"
         },
         "libcrosszig-osx-universal.a": {

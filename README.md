@@ -1,10 +1,10 @@
 # crosszig
 
 A small sample C++ project that cross-compiles from any of the pixi platforms
-to `linux-64`, `win-64-msvc`, `osx-64` and `osx-arm64`, using **zig**
-as the cross toolchain and **CMake** as the build system. Boost is pulled in with
-`FetchContent`, so nothing has to be installed on the machine beyond the pixi
-environment.
+to `linux-32`, `linux-64`, `linux-aarch64`, `win-32-msvc`, `win-64-msvc`,
+`osx-64` and `osx-arm64`, using **zig** as the cross toolchain and **CMake** as
+the build system. Boost is pulled in with `FetchContent`, so nothing has to be
+installed on the machine beyond the pixi environment.
 
 ## Quick start
 
@@ -32,7 +32,7 @@ installs into `build/<platform>-<config>/install/`.
 | `cmake/ZigToolchain.cmake`| Toolchain file that turns `zig cc` / `zig c++` into a cross compiler |
 | `cmake/targets.json`      | The zig triple and CPU baseline each platform builds with     |
 | `cmake/ZigLinkRules.cmake`| Two link rule corrections needed for the MSVC ABI target      |
-| `tools/xwin.py`           | Fetches and caches Microsoft's CRT and SDK for `win-64-msvc`  |
+| `tools/xwin.py`           | Fetches and caches Microsoft's CRT and SDK for the Windows targets |
 | `cmake/Dependencies.cmake`| Fetches Boost and shares one checkout across all platforms    |
 | `dev.py`                  | Thin cross-platform wrapper around the CMake commands         |
 | `tools/binfmt.py`         | Reads compatibility facts out of ELF, PE and Mach-O files     |
@@ -71,14 +71,16 @@ Which triple each platform maps to lives in `cmake/targets.json`, read both by
 the toolchain file and by `dev.py`, so the two cannot drift apart. Three parts
 of those triples are deliberate choices rather than defaults:
 
-* **`x86_64-linux-gnu.2.3.3`** pins glibc. Without the suffix zig would target
+* **`x86_64-linux-gnu.2.3.3`** and **`aarch64-linux-gnu.2.17`** pin glibc. Without the suffix zig would target
   the glibc of whichever machine runs the build, and the result would refuse to
   start on anything older. 2.3.3 is from 2004, so in practice the glibc version
   stops being a constraint at all. Only three symbols ever pushed the floor up:
   `memcpy@2.14`, `__isoc99_sscanf@2.7` and `aligned_alloc@2.16`. The first two
   resolve to older versions on their own once the triple asks for one, and the
   third is covered by `src/compat/glibc_compat.cpp`, because zig's prebuilt
-  libc++abi calls `aligned_alloc` no matter which glibc is targeted.
+  libc++abi calls `aligned_alloc` no matter which glibc is targeted. aarch64
+  stops at 2.17 because that is the release the port was added in, so there is
+  nothing older to target.
 * **`macos.10.12`** and **`macos.11.0`** pin the deployment target, Sierra
   for Intel and Big Sur for Apple Silicon. zig's own default is considerably
   newer, which would exclude perfectly current machines for no reason. 11.0 is
@@ -92,8 +94,8 @@ of those triples are deliberate choices rather than defaults:
   this for a cross target, but it is stated explicitly because it is the one
   compatibility property that cannot be verified after the fact.
 
-`win-64-msvc` additionally carries an `sdk`, a `cxx-driver`, a `cxx-standard`
-and a `compile-flags`. See below for why.
+The two Windows targets additionally carry an `sdk`, a `cxx-driver`, a
+`cxx-standard` and a `compile-flags`. See below for why.
 
 ### Why Windows goes through the MSVC ABI
 
@@ -111,14 +113,15 @@ static one despite the name, it is mingw's supplement of long double and
 complex math routines, and `-static` leaves the import table untouched. Asking
 for `-lmsvcrt` does not help either; it only stacks `msvcrt.dll` on top of the
 `api-ms-win-crt-*` set that zig's startup objects reference anyway. So the
-mingw target was dropped and `win-64-msvc` is the only Windows target.
+mingw target was dropped, and both Windows targets go through the MSVC ABI.
 
-It links Microsoft's own static CRT and so imports no C runtime at all, which
-is what makes it runnable on a Windows that has never seen the UCRT update.
+They link Microsoft's own static CRT and so import no C runtime at all, which
+is what makes them runnable on a Windows that has never seen the UCRT update.
 The one `USER32.dll` import is `LoadStringA`, from the static CRT's error
 message path. `min-os` 6.0 is a real floor rather than a linker default: the
 CRT reaches for SRW locks, condition variables, the thread pool API and
-`CompareStringEx`, all of which arrived in Vista.
+`CompareStringEx`, all of which arrived in Vista. The `imports` lists in the
+manifest are what makes that checkable rather than merely asserted.
 
 Those libraries only ship inside Visual Studio and the Windows SDK and are not
 redistributable, so they have to be fetched once:
@@ -129,11 +132,13 @@ python tools/xwin.py setup --accept-license
 
 That downloads [xwin](https://github.com/Jake-Shadle/xwin) at a pinned version,
 checks it against the published sha256, and has it pull the CRT and SDK
-straight from Microsoft into `.cache/xwin/` (about 82 MB over the wire, 630 MB
-unpacked, x86_64 only). It is cached, so this is a one-time cost, and
+straight from Microsoft into `.cache/xwin/` (around 150 MB over the wire and
+1.1 GB unpacked for the x86 and x86_64 libraries together; the headers are
+shared). It is cached, so this is a one-time cost, and
 `tools/xwin.py` is standalone: no imports from the rest of the repository.
-Until it has been run, building `win-64-msvc` stops with that command in the
-error message.
+Both architectures are unpacked in one go, since they share the headers.
+Until it has been run, building either Windows target stops with that command
+in the error message.
 
 Three things make this target different from the others, all of them recorded
 in `cmake/targets.json`:
@@ -163,11 +168,14 @@ report "no work to do" against artifacts built for the old target.
 
 ## Distribution
 
-`./dev.py dist` gathers the release artifacts of all four platforms into a flat
+`./dev.py dist` gathers the release artifacts of every platform into a flat
 `./dist/`, suffixing each file with the platform it was built for:
 
 ```
+dist/crosszig-linux-32        dist/libcrosszig-linux-32.a
 dist/crosszig-linux-64        dist/libcrosszig-linux-64.a
+dist/crosszig-linux-aarch64   dist/libcrosszig-linux-aarch64.a
+dist/crosszig-win-32-msvc.exe dist/crosszig-win-32-msvc.lib
 dist/crosszig-win-64-msvc.exe dist/crosszig-win-64-msvc.lib
 dist/crosszig-osx-universal   dist/libcrosszig-osx-universal.a
 ```

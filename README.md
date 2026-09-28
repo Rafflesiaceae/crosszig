@@ -71,9 +71,14 @@ Which triple each platform maps to lives in `cmake/targets.json`, read both by
 the toolchain file and by `dev.py`, so the two cannot drift apart. Three parts
 of those triples are deliberate choices rather than defaults:
 
-* **`x86_64-linux-gnu.2.28`** pins glibc. Without the suffix zig would target
+* **`x86_64-linux-gnu.2.3.3`** pins glibc. Without the suffix zig would target
   the glibc of whichever machine runs the build, and the result would refuse to
-  start on anything older. 2.28 is what RHEL 8, Debian 10 and Ubuntu 18.10 ship.
+  start on anything older. 2.3.3 is from 2004, so in practice the glibc version
+  stops being a constraint at all. Only three symbols ever pushed the floor up:
+  `memcpy@2.14`, `__isoc99_sscanf@2.7` and `aligned_alloc@2.16`. The first two
+  resolve to older versions on their own once the triple asks for one, and the
+  third is covered by `src/compat/glibc_compat.cpp`, because zig's prebuilt
+  libc++abi calls `aligned_alloc` no matter which glibc is targeted.
 * **`macos.11.0`** pins the macOS deployment target to Big Sur. zig's own
   default is considerably newer, which would exclude perfectly current
   machines for no reason. Note the version needs a minor component:
@@ -175,14 +180,14 @@ file that was collected.
 ```json
 {
     "cpu": "baseline",
-    "targets": { "linux-64": { "triple": "x86_64-linux-gnu.2.28", "...": "..." } },
+    "targets": { "linux-64": { "triple": "x86_64-linux-gnu.2.3.3", "...": "..." } },
     "files": {
         "crosszig-linux-64": {
             "platform": "linux-64",
             "format": "elf",
             "arch": "x86-64",
             "needs": ["libc.so.6", "..."],
-            "symbol-versions": { "GLIBC": "2.16" },
+            "symbol-versions": { "GLIBC": "2.3.3" },
             "runpath": [],
             "min-kernel": "2.0.0"
         }
@@ -211,7 +216,7 @@ Dependency names are whatever the container itself stores: a soname for ELF
 (`libc.so.6`), an import table entry for PE (`KERNEL32.dll`), an install name
 for Mach-O (`/usr/lib/libSystem.B.dylib`). `symbol-versions` is keyed on the
 version namespace rather than on the library, because that is the part that
-decides compatibility: `GLIBC_2.16` means glibc 2.16 or newer regardless of
+decides compatibility: `GLIBC_2.3.3` means glibc 2.3.3 or newer regardless of
 which of libc, libm or libpthread pulled it in.
 
 `dist-check` then asserts three separate things:

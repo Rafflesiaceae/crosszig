@@ -3,6 +3,10 @@
 
 add_library(crosszig_core STATIC
     log_parser.cpp
+    # Fills in libc functions the targeted platform is too old to provide;
+    # compiles to nothing where they are present. Part of the library rather
+    # than of the binary so that a consumer linking libcrosszig.a gets them too.
+    compat/glibc_compat.cpp
 )
 add_library(crosszig::core ALIAS crosszig_core)
 

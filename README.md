@@ -1,8 +1,8 @@
 # crosszig
 
 A small sample C++ project that cross-compiles from any of the pixi platforms
-(`linux-64`, `win-64`, `osx-64`, `osx-arm64`) to any of them, using **zig** as
-the cross toolchain and **CMake** as the build system. Boost is pulled in with
+to `linux-64`, `win-64`, `win-64-msvc`, `osx-64` and `osx-arm64`, using **zig**
+as the cross toolchain and **CMake** as the build system. Boost is pulled in with
 `FetchContent`, so nothing has to be installed on the machine beyond the pixi
 environment.
 
@@ -30,6 +30,8 @@ installs into `build/<platform>-<config>/install/`.
 | `src/`                    | Sample code: a log-line parser built on Boost.Regex           |
 | `cmake/ZigToolchain.cmake`| Toolchain file that turns `zig cc` / `zig c++` into a cross compiler |
 | `cmake/targets.json`      | The zig triple and CPU baseline each platform builds with     |
+| `cmake/ZigLinkRules.cmake`| Two link rule corrections needed for the MSVC ABI target      |
+| `tools/xwin.py`           | Fetches and caches Microsoft's CRT and SDK for `win-64-msvc`  |
 | `cmake/Dependencies.cmake`| Fetches Boost and shares one checkout across all platforms    |
 | `dev.py`                  | Thin cross-platform wrapper around the CMake commands         |
 | `tools/binfmt.py`         | Reads compatibility facts out of ELF, PE and Mach-O files     |
@@ -79,28 +81,62 @@ of those triples are deliberate choices rather than defaults:
   this for a cross target, but it is stated explicitly because it is the one
   compatibility property that cannot be verified after the fact.
 
-`win-64` additionally carries `"link-flags": "-lucrtbase"`. See below for why.
+`win-64` additionally carries `"link-flags": "-lucrtbase"`, and `win-64-msvc`
+carries an `sdk`, a `cxx-driver` and a `cxx-standard`. See below for why.
 
-### The Windows C runtime
+### The two Windows targets
 
-The Windows binary imports `KERNEL32.dll` and `ucrtbase.dll`, and that is as
-small as the list gets. It cannot be reduced to nothing, because `ucrtbase.dll`
-*is* the C runtime: zig's `windows-gnu` target is mingw-w64, which wraps the
-UCRT rather than replacing it, and no static UCRT exists for it. `libucrt.a` in
-zig's tree is not one, despite the name; it is mingw's supplement of long
-double and complex math routines. `-static` leaves the import table untouched,
-and `x86_64-windows-msvc` is not available at all (`unable to provide libc for
-target`).
+There are two, because the C runtime is the thing that decides how far back a
+Windows binary reaches, and the two ways of getting one land in different
+places:
 
-What `-lucrtbase` does buy is resolving the runtime against `ucrtbase.dll`
-directly rather than against the dozen `api-ms-win-crt-*.dll` entries, which
-are only forwarders to that same library. Twelve import table entries become
-two, and the set of Windows versions the binary runs on does not change: both
-forms live in System32 from Windows 10 on, and on 8.1 and earlier both arrive
-together with the UCRT update. The one caveat is that Microsoft documents the
-API sets as the supported contract, so importing `ucrtbase.dll` directly,
-while common and working, sits outside that. Deleting the `link-flags` entry
-from `cmake/targets.json` reverts to the API sets.
+| Target        | Imports                        | Needs                              |
+| ------------- | ------------------------------ | ---------------------------------- |
+| `win-64`      | `KERNEL32.dll`, `ucrtbase.dll` | nothing but pixi to build          |
+| `win-64-msvc` | `KERNEL32.dll`, `USER32.dll`   | a one-off SDK download, see below  |
+
+**`win-64`** goes through mingw-w64, which wraps the UCRT rather than
+replacing it, so `ucrtbase.dll` cannot be linked away: it *is* the C runtime.
+`libucrt.a` in zig's tree is not a static one despite the name, it is mingw's
+supplement of long double and complex math routines. `-static` leaves the
+import table untouched. What `-lucrtbase` does buy is resolving against
+`ucrtbase.dll` directly rather than against the dozen `api-ms-win-crt-*.dll`
+entries, which are only forwarders to it: twelve import table entries become
+two, with no change to which Windows versions run the binary, since both forms
+live in System32 from Windows 10 on and on 8.1 and earlier both arrive with the
+same UCRT update. Microsoft documents the API sets as the supported contract,
+so importing `ucrtbase.dll` directly sits outside that; delete the
+`link-flags` entry in `cmake/targets.json` to go back to them.
+
+**`win-64-msvc`** links Microsoft's own static CRT and so imports no C runtime
+at all, which is what makes it runnable on a Windows that has never seen the
+UCRT update. Those libraries only ship inside Visual Studio and the Windows
+SDK and are not redistributable, so they have to be fetched once:
+
+```sh
+python tools/xwin.py setup --accept-license
+```
+
+That downloads [xwin](https://github.com/Jake-Shadle/xwin) at a pinned version,
+checks it against the published sha256, and has it pull the CRT and SDK
+straight from Microsoft into `.cache/xwin/` (about 82 MB over the wire, 630 MB
+unpacked, x86_64 only). It is cached, so this is a one-time cost, and
+`tools/xwin.py` is standalone: no imports from the rest of the repository.
+Until it has been run, building `win-64-msvc` stops with that command in the
+error message.
+
+Three things make this target different from the others, all of them recorded
+in `cmake/targets.json`:
+
+* **It builds at C++14, not C++11.** MSVC's own STL headers use deduced return
+  types and relaxed constexpr, so C++11 is not available with them at all.
+  Every other target stays at C++11.
+* **It compiles through `zig cc`, not `zig c++`.** The `c++` driver always
+  builds and links zig's libc++, whose `std::bad_cast` and `type_info` collide
+  with MSVC's `vcruntime_typeinfo.h`. The plain driver still compiles C++ by
+  file extension and leaves the standard library to MSVC.
+* **Two of CMake's link rules need correcting**, in
+  `cmake/ZigLinkRules.cmake`. See the comment at the top of that file.
 
 Editing a triple discards the affected build directory automatically. The
 triple lives inside the generated compiler shims rather than in the compile

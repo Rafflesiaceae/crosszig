@@ -4,6 +4,10 @@ project(crosszig VERSION 0.1.0 LANGUAGES CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+# Normally 11; the toolchain file overrides it for targets whose standard
+# library cannot go that low. See cmake/targets.json.
+set(CROSSZIG_CXX_STANDARD "11" CACHE STRING "C++ standard the sample is built with")
+
 # Single-config generators default to an unoptimised, undefined build type.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)

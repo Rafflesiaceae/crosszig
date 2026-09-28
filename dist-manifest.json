@@ -21,6 +21,15 @@
             "processor": "AMD64",
             "triple": "x86_64-windows-gnu",
             "link-flags": "-lucrtbase"
+        },
+        "win-64-msvc": {
+            "system": "Windows",
+            "processor": "AMD64",
+            "triple": "x86_64-windows-msvc",
+            "sdk": "xwin",
+            "cxx-standard": 14,
+            "link-flags": "-Xlinker /IGNORE:4099",
+            "cxx-driver": "cc"
         }
     },
     "files": {
@@ -71,6 +80,22 @@
             "rpath": [],
             "code-signature": true,
             "macos-min": "11.0.0"
+        },
+        "crosszig-win-64-msvc.exe": {
+            "platform": "win-64-msvc",
+            "format": "pe",
+            "arch": "x86-64",
+            "needs": [
+                "KERNEL32.dll",
+                "USER32.dll"
+            ],
+            "min-os": "6.0",
+            "subsystem-version": "6.0"
+        },
+        "crosszig-win-64-msvc.lib": {
+            "platform": "win-64-msvc",
+            "format": "archive",
+            "arch": "x86-64"
         },
         "crosszig-win-64.exe": {
             "platform": "win-64",

@@ -21,6 +21,15 @@
             "system": "Darwin",
             "processor": "arm64",
             "triple": "aarch64-macos.11.0-none"
+        },
+        "win-64-msvc": {
+            "system": "Windows",
+            "processor": "AMD64",
+            "triple": "x86_64-windows-msvc",
+            "sdk": "xwin",
+            "cxx-standard": 14,
+            "link-flags": "-Xlinker /IGNORE:4099",
+            "cxx-driver": "cc"
         }
     }
 }

@@ -13,7 +13,10 @@
 # idempotent, and the variables the file depends on are forwarded explicitly.
 list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
      CROSSZIG_TARGET
-     CROSSZIG_ZIG_EXECUTABLE)
+     CROSSZIG_ZIG_EXECUTABLE
+     CMAKE_MSVC_RUNTIME_LIBRARY
+     CMAKE_USER_MAKE_RULES_OVERRIDE_C
+     CMAKE_USER_MAKE_RULES_OVERRIDE_CXX)
 
 if(NOT CROSSZIG_TARGET)
     message(FATAL_ERROR
@@ -44,14 +47,72 @@ string(JSON _crosszig_triple GET "${_crosszig_platform}" "triple")
 # used, so there would be nothing left to check afterwards.
 string(JSON _crosszig_cpu GET "${_crosszig_targets}" "cpu")
 
-# Optional per-platform link flags. win-64 uses this to resolve the C runtime
-# against ucrtbase.dll directly instead of against the api-ms-win-crt-*
-# forwarders that all point at it anyway, which turns a dozen import table
-# entries into one without changing which Windows versions the binary runs on.
-string(JSON _crosszig_link_flags ERROR_VARIABLE _crosszig_json_error
-       GET "${_crosszig_platform}" "link-flags")
-if(NOT _crosszig_json_error STREQUAL "NOTFOUND")
-    set(_crosszig_link_flags "")
+# Optional per-platform settings; everything below has a sensible default so
+# that a platform entry only has to spell out what makes it different.
+function(_crosszig_field out_var json field fallback)
+    string(JSON _value ERROR_VARIABLE _error GET "${json}" "${field}")
+    if(NOT _error STREQUAL "NOTFOUND")
+        set(_value "${fallback}")
+    endif()
+    set(${out_var} "${_value}" PARENT_SCOPE)
+endfunction()
+
+# win-64 uses link-flags to resolve the C runtime against ucrtbase.dll directly
+# instead of against the api-ms-win-crt-* forwarders that all point at it
+# anyway, which turns a dozen import table entries into one without changing
+# which Windows versions the binary runs on.
+_crosszig_field(_crosszig_link_flags    "${_crosszig_platform}" "link-flags"    "")
+_crosszig_field(_crosszig_compile_flags "${_crosszig_platform}" "compile-flags" "")
+_crosszig_field(_crosszig_sdk           "${_crosszig_platform}" "sdk"           "")
+_crosszig_field(_crosszig_cxx_standard  "${_crosszig_platform}" "cxx-standard"  "11")
+_crosszig_field(_crosszig_cxx_driver    "${_crosszig_platform}" "cxx-driver"    "c++")
+
+set(CROSSZIG_CXX_STANDARD "${_crosszig_cxx_standard}" CACHE STRING
+    "C++ standard the sample is built with" FORCE)
+
+# An SDK that has to be fetched before this platform can be built at all.
+set(_crosszig_zig_libc "")
+if(_crosszig_sdk STREQUAL "xwin")
+    find_program(CROSSZIG_PYTHON NAMES python3 python REQUIRED)
+    execute_process(
+        COMMAND "${CROSSZIG_PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/../tools/xwin.py" paths
+        OUTPUT_VARIABLE _crosszig_xwin
+        ERROR_VARIABLE _crosszig_xwin_error
+        RESULT_VARIABLE _crosszig_xwin_result
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _crosszig_xwin_result EQUAL 0)
+        message(FATAL_ERROR
+                "Target '${CROSSZIG_TARGET}' builds against Microsoft's CRT and Windows "
+                "SDK, which are not redistributable and so have to be fetched once:\n"
+                "    python tools/xwin.py setup --accept-license\n"
+                "${_crosszig_xwin_error}")
+    endif()
+
+    # Statically, so that the result needs no C runtime DLL at all. The debug
+    # variants of those libraries are not redistributable and xwin does not
+    # fetch them, so this stays release in every configuration.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
+    # CMake's MSVC style link line carries a two component /version that zig
+    # rejects; this hook is where that gets corrected.
+    set(CMAKE_USER_MAKE_RULES_OVERRIDE_C "${CMAKE_CURRENT_LIST_DIR}/ZigLinkRules.cmake")
+    set(CMAKE_USER_MAKE_RULES_OVERRIDE_CXX "${CMAKE_CURRENT_LIST_DIR}/ZigLinkRules.cmake")
+
+    # zig refuses to target the MSVC ABI unless it is told where that CRT is,
+    # and for `zig cc` the only way to say so is the ZIG_LIBC environment
+    # variable, which the compiler shims below export.
+    string(JSON _crosszig_zig_libc GET "${_crosszig_xwin}" "zig-libc")
+
+    # The Win32 headers are not covered by the libc file above. They go in as
+    # standard include directories rather than as flags so that they do not
+    # also end up on every link command line.
+    string(JSON _crosszig_include_count LENGTH "${_crosszig_xwin}" "include")
+    math(EXPR _crosszig_include_last "${_crosszig_include_count} - 1")
+    foreach(_crosszig_index RANGE ${_crosszig_include_last})
+        string(JSON _crosszig_include GET "${_crosszig_xwin}" "include" ${_crosszig_index})
+        list(APPEND CMAKE_C_STANDARD_INCLUDE_DIRECTORIES "${_crosszig_include}")
+        list(APPEND CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES "${_crosszig_include}")
+    endforeach()
 endif()
 
 find_program(CROSSZIG_ZIG_EXECUTABLE NAMES zig REQUIRED
@@ -77,6 +138,14 @@ get_filename_component(_crosszig_zig_lib_dir "${CMAKE_MATCH_1}" ABSOLUTE
 # and linking alike.
 set(_crosszig_bin_dir "${CMAKE_BINARY_DIR}/zig-toolchain")
 
+if(_crosszig_zig_libc AND CMAKE_HOST_WIN32)
+    set(CROSSZIG_WRAPPER_ENV "set \"ZIG_LIBC=${_crosszig_zig_libc}\"")
+elseif(_crosszig_zig_libc)
+    set(CROSSZIG_WRAPPER_ENV "export ZIG_LIBC=\"${_crosszig_zig_libc}\"")
+else()
+    set(CROSSZIG_WRAPPER_ENV "")
+endif()
+
 function(_crosszig_wrapper out_var name)
     # Everything after `name` becomes the fixed argument list of the shim.
     list(JOIN ARGN " " CROSSZIG_WRAPPER_ARGS)
@@ -101,9 +170,17 @@ function(_crosszig_wrapper out_var name)
 endfunction()
 
 _crosszig_wrapper(_crosszig_cc  zig-cc  cc  -target ${_crosszig_triple} -mcpu=${_crosszig_cpu})
-_crosszig_wrapper(_crosszig_cxx zig-cxx c++ -target ${_crosszig_triple} -mcpu=${_crosszig_cpu})
+_crosszig_wrapper(_crosszig_cxx zig-cxx ${_crosszig_cxx_driver}
+                  -target ${_crosszig_triple} -mcpu=${_crosszig_cpu})
 _crosszig_wrapper(_crosszig_ar     zig-ar     ar)
 _crosszig_wrapper(_crosszig_ranlib zig-ranlib ranlib)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    # CMake enables the RC language for Windows targets and insists on a real
+    # program even when, as here, there is not a single .rc file to compile.
+    _crosszig_wrapper(_crosszig_rc zig-rc rc)
+    set(CMAKE_RC_COMPILER "${_crosszig_rc}" CACHE FILEPATH "zig rc" FORCE)
+endif()
 
 set(CMAKE_C_COMPILER "${_crosszig_cc}")
 set(CMAKE_CXX_COMPILER "${_crosszig_cxx}")
@@ -130,14 +207,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     # bundled libSystem.tbd to the linker, and the link then fails with
     # "library not found for -lSystem". Putting the stub directory on the
     # library search path fixes that and is a no-op otherwise.
-    foreach(_var EXE SHARED MODULE)
-        string(APPEND CMAKE_${_var}_LINKER_FLAGS_INIT
-               " -L${_crosszig_zig_lib_dir}/libc/darwin")
-    endforeach()
+    string(APPEND _crosszig_link_flags " -L${_crosszig_zig_lib_dir}/libc/darwin")
 endif()
 
+# Plain assignment, not append: this file is re-read once per language and
+# again for every try_compile, and appending would stack the flags up.
+set(CMAKE_C_FLAGS_INIT "${_crosszig_compile_flags}")
+set(CMAKE_CXX_FLAGS_INIT "${_crosszig_compile_flags}")
 foreach(_crosszig_kind EXE SHARED MODULE)
-    string(APPEND CMAKE_${_crosszig_kind}_LINKER_FLAGS_INIT " ${_crosszig_link_flags}")
+    set(CMAKE_${_crosszig_kind}_LINKER_FLAGS_INIT "${_crosszig_link_flags}")
 endforeach()
 
 # There is no target sysroot on disk - zig resolves the target headers and

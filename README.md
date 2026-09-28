@@ -63,6 +63,12 @@ it is building for and keep `find_package` away from host libraries.
 Since zig ships the headers, libc stubs and runtime libraries for all of its
 targets, no additional SDK is needed - including for the macOS targets.
 
+The `linux-64` triple carries an explicit glibc version (`x86_64-linux-gnu.2.28`).
+Without it zig would target the glibc of whichever machine runs the build, and
+the result would then refuse to start on anything older. 2.28 is what RHEL 8,
+Debian 10 and Ubuntu 18.10 ship. Lowering the number restricts which symbol
+versions the linker may use; raising it widens them.
+
 ## Distribution
 
 `./dev.py dist` gathers the release artifacts of all four platforms into a flat
@@ -80,15 +86,33 @@ is off. `./dev.py dist-check <dir>` runs the same verification on its own, so a
 distribution can also be checked after the fact, for instance once it has been
 unpacked somewhere else.
 
-The manifest describes the complete expected content: every file it lists has
-to be present, has to need exactly the dynamic libraries it lists, and any file
-in the directory that the manifest does not mention is reported as well. This
-is what catches a cross build that accidentally picked up a host library. Names
+The manifest looks like this:
+
+```json
+{
+    "glibc": "2.28",
+    "files": {
+        "crosszig-linux-64": ["libm.so.6", "libpthread.so.0", "..."],
+        "libcrosszig-linux-64.a": []
+    }
+}
+```
+
+`files` describes the complete expected content: every file it lists has to be
+present, has to need exactly the dynamic libraries it lists, and any file in
+the directory that the manifest does not mention is reported as well. This is
+what catches a cross build that accidentally picked up a host library. Names
 are whatever the container format records - a soname for ELF (`libc.so.6`), an
 import table entry for PE (`KERNEL32.dll`), an install name for Mach-O
 (`/usr/lib/libSystem.B.dylib`). Static archives carry no link information of
 their own and therefore map to an empty list; for them only presence is
 checked.
+
+`glibc` is the version the `linux-64` target is pinned to, and it is checked
+from both sides: it has to agree with the pin in `cmake/ZigToolchain.cmake`, so
+that changing the pin cannot go unnoticed, and no ELF file may reference a
+symbol version above it. Today the binaries stay well under the ceiling - the
+highest they actually reach for is `GLIBC_2.16`.
 
 Reading those three formats is done by `tools/binfmt.py` rather than by
 `readelf`/`objdump`/`otool`, because no single one of those tools reads all

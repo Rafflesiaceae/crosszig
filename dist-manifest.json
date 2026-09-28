@@ -1,36 +1,39 @@
 {
-    "crosszig-linux-64": [
-        "libm.so.6",
-        "libpthread.so.0",
-        "libc.so.6",
-        "libdl.so.2",
-        "librt.so.1",
-        "ld-linux-x86-64.so.2",
-        "libutil.so.1",
-        "libresolv.so.2"
-    ],
-    "crosszig-osx-64": [
-        "/usr/lib/libSystem.B.dylib"
-    ],
-    "crosszig-osx-arm64": [
-        "/usr/lib/libSystem.B.dylib"
-    ],
-    "crosszig-win-64.exe": [
-        "KERNEL32.dll",
-        "api-ms-win-crt-heap-l1-1-0.dll",
-        "api-ms-win-crt-runtime-l1-1-0.dll",
-        "api-ms-win-crt-stdio-l1-1-0.dll",
-        "api-ms-win-crt-string-l1-1-0.dll",
-        "api-ms-win-crt-private-l1-1-0.dll",
-        "api-ms-win-crt-environment-l1-1-0.dll",
-        "api-ms-win-crt-math-l1-1-0.dll",
-        "api-ms-win-crt-locale-l1-1-0.dll",
-        "api-ms-win-crt-time-l1-1-0.dll",
-        "api-ms-win-crt-multibyte-l1-1-0.dll",
-        "api-ms-win-crt-convert-l1-1-0.dll"
-    ],
-    "libcrosszig-linux-64.a": [],
-    "libcrosszig-osx-64.a": [],
-    "libcrosszig-osx-arm64.a": [],
-    "libcrosszig-win-64.a": []
+    "glibc": "2.28",
+    "files": {
+        "crosszig-linux-64": [
+            "libm.so.6",
+            "libpthread.so.0",
+            "libc.so.6",
+            "libdl.so.2",
+            "librt.so.1",
+            "ld-linux-x86-64.so.2",
+            "libutil.so.1",
+            "libresolv.so.2"
+        ],
+        "crosszig-osx-64": [
+            "/usr/lib/libSystem.B.dylib"
+        ],
+        "crosszig-osx-arm64": [
+            "/usr/lib/libSystem.B.dylib"
+        ],
+        "crosszig-win-64.exe": [
+            "KERNEL32.dll",
+            "api-ms-win-crt-heap-l1-1-0.dll",
+            "api-ms-win-crt-runtime-l1-1-0.dll",
+            "api-ms-win-crt-stdio-l1-1-0.dll",
+            "api-ms-win-crt-string-l1-1-0.dll",
+            "api-ms-win-crt-private-l1-1-0.dll",
+            "api-ms-win-crt-environment-l1-1-0.dll",
+            "api-ms-win-crt-math-l1-1-0.dll",
+            "api-ms-win-crt-locale-l1-1-0.dll",
+            "api-ms-win-crt-time-l1-1-0.dll",
+            "api-ms-win-crt-multibyte-l1-1-0.dll",
+            "api-ms-win-crt-convert-l1-1-0.dll"
+        ],
+        "libcrosszig-linux-64.a": [],
+        "libcrosszig-osx-64.a": [],
+        "libcrosszig-osx-arm64.a": [],
+        "libcrosszig-win-64.a": []
+    }
 }

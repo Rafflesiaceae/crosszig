@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -129,17 +130,32 @@ def build_one(target, config, jobs=None, clean=False):
     run(["cmake", "--install", output, "--prefix", install_dir(target, config)])
 
 
+def targeted_glibc():
+    """The glibc version the linux-64 target is pinned to in the toolchain file.
+
+    Read back from ZigToolchain.cmake rather than duplicated here, so that the
+    manifest cannot quietly disagree with what is actually being built.
+    """
+    match = re.search(r"x86_64-linux-gnu\.([0-9][0-9.]*)", TOOLCHAIN.read_text())
+    if not match:
+        sys.exit(f"dev.py: no pinned glibc version found in {TOOLCHAIN}")
+    return match.group(1)
+
+
 def dist_name(path, target):
     """`libcrosszig.a` for osx-arm64 becomes `libcrosszig-osx-arm64.a`."""
     return f"{path.stem}-{target}{path.suffix}"
 
 
-def collect_dependencies(directory):
-    """Maps every file in `directory` to the dynamic libraries it needs."""
+def build_manifest(directory):
+    """Describes `directory` the way dist-manifest.json records it."""
     return {
-        path.name: binfmt.dynamic_dependencies(path)
-        for path in sorted(directory.iterdir())
-        if path.is_file()
+        "glibc": targeted_glibc(),
+        "files": {
+            path.name: binfmt.dynamic_dependencies(path)
+            for path in sorted(directory.iterdir())
+            if path.is_file()
+        },
     }
 
 
@@ -150,14 +166,27 @@ def check_dist(directory):
     to be there, has to need every library it lists, and must not need any
     other. Files in the directory that the manifest does not mention are
     reported too, so that a stale artifact cannot slip through unnoticed.
+
+    On top of that, no ELF file may need a glibc newer than the recorded one,
+    which is what keeps the binaries loadable on older distributions.
     """
     if not MANIFEST.is_file():
         sys.exit(f"dev.py: no manifest at {MANIFEST}")
 
     manifest = json.loads(MANIFEST.read_text())
+    expected_glibc = manifest["glibc"]
     problems = []
 
-    for name, expected in sorted(manifest.items()):
+    # A changed pin in the toolchain file has to be acknowledged by
+    # regenerating the manifest, otherwise the ceiling checked below would
+    # silently stop matching what is being built.
+    pinned_glibc = targeted_glibc()
+    if expected_glibc != pinned_glibc:
+        problems.append(
+            f"manifest records glibc {expected_glibc}, but {TOOLCHAIN.name} "
+            f"pins {pinned_glibc}")
+
+    for name, expected in sorted(manifest["files"].items()):
         path = directory / name
         if not path.is_file():
             problems.append(f"{name}: missing")
@@ -165,6 +194,7 @@ def check_dist(directory):
 
         try:
             actual = binfmt.dynamic_dependencies(path)
+            needed_glibc = binfmt.glibc_requirement(path)
         except (binfmt.UnknownFormat, OSError) as error:
             problems.append(f"{name}: {error}")
             continue
@@ -174,8 +204,13 @@ def check_dist(directory):
         for library in sorted(set(actual) - set(expected)):
             problems.append(f"{name}: unexpected dependency: {library}")
 
+        if needed_glibc is not None and \
+                binfmt.version_tuple(needed_glibc) > binfmt.version_tuple(expected_glibc):
+            problems.append(
+                f"{name}: needs glibc {needed_glibc}, above the targeted {expected_glibc}")
+
     for path in sorted(directory.iterdir()):
-        if path.is_file() and path.name not in manifest:
+        if path.is_file() and path.name not in manifest["files"]:
             problems.append(f"{path.name}: present but not listed in the manifest")
 
     if problems:
@@ -184,7 +219,8 @@ def check_dist(directory):
             print(f"  {problem}", file=sys.stderr)
         return False
 
-    print(f"\ndist-check ok: {len(manifest)} files in {directory}")
+    print(f"\ndist-check ok: {len(manifest['files'])} files in {directory}, "
+          f"glibc <= {expected_glibc}")
     return True
 
 
@@ -241,7 +277,7 @@ def command_dist(args):
                 print(f"  {destination.relative_to(ROOT)}", flush=True)
 
     if args.write_manifest:
-        MANIFEST.write_text(json.dumps(collect_dependencies(DIST_DIR), indent=4) + "\n")
+        MANIFEST.write_text(json.dumps(build_manifest(DIST_DIR), indent=4) + "\n")
         print(f"\nwrote {MANIFEST.relative_to(ROOT)}", flush=True)
 
     if not check_dist(DIST_DIR):

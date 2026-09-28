@@ -1,7 +1,7 @@
 # crosszig
 
 A small sample C++ project that cross-compiles from any of the pixi platforms
-to `linux-64`, `win-64`, `win-64-msvc`, `osx-64` and `osx-arm64`, using **zig**
+to `linux-64`, `win-64-msvc`, `osx-64` and `osx-arm64`, using **zig**
 as the cross toolchain and **CMake** as the build system. Boost is pulled in with
 `FetchContent`, so nothing has to be installed on the machine beyond the pixi
 environment.
@@ -11,7 +11,7 @@ environment.
 ```sh
 ./dev.py build              # debug build for the host platform
 ./dev.py build -r -a        # release build for every supported platform
-./dev.py build -t win-64    # debug build for Windows only
+./dev.py build -t win-64-msvc  # debug build for Windows only
 ./dev.py build -v           # same, with the build output unfiltered
 ./dev.py run -r             # build for the host and run the binary
 ./dev.py dist               # collect the release artifacts into ./dist
@@ -48,11 +48,11 @@ installs into `build/<platform>-<config>/install/`.
 `dev.py` is only a convenience layer; the plain CMake invocation is:
 
 ```sh
-cmake -S . -B build/win-64-release -G Ninja \
+cmake -S . -B build/win-64-msvc-release -G Ninja \
       --toolchain cmake/ZigToolchain.cmake \
-      -DCROSSZIG_TARGET=win-64 \
+      -DCROSSZIG_TARGET=win-64-msvc \
       -DCMAKE_BUILD_TYPE=Release
-cmake --build build/win-64-release
+cmake --build build/win-64-msvc-release
 ```
 
 ## How the cross compilation works
@@ -92,37 +92,36 @@ of those triples are deliberate choices rather than defaults:
   this for a cross target, but it is stated explicitly because it is the one
   compatibility property that cannot be verified after the fact.
 
-`win-64` additionally carries `"link-flags": "-lucrtbase"`, and `win-64-msvc`
-carries an `sdk`, a `cxx-driver` and a `cxx-standard`. See below for why.
+`win-64-msvc` additionally carries an `sdk`, a `cxx-driver`, a `cxx-standard`
+and a `compile-flags`. See below for why.
 
-### The two Windows targets
+### Why Windows goes through the MSVC ABI
 
-There are two, because the C runtime is the thing that decides how far back a
-Windows binary reaches, and the two ways of getting one land in different
-places:
+The C runtime is what decides how far back a Windows binary reaches, and zig
+offers two ways of getting one. Only one of them gets rid of it:
 
-| Target        | Imports                        | Needs                              |
-| ------------- | ------------------------------ | ---------------------------------- |
-| `win-64`      | `KERNEL32.dll`, `ucrtbase.dll` | nothing but pixi to build          |
-| `win-64-msvc` | `KERNEL32.dll`, `USER32.dll`   | a one-off SDK download, see below  |
+| Toolchain | Imports                        | Needs                             |
+| --------- | ------------------------------ | --------------------------------- |
+| mingw-w64 | `KERNEL32.dll`, `ucrtbase.dll` | nothing but pixi to build         |
+| MSVC ABI  | `KERNEL32.dll`, `USER32.dll`   | a one-off SDK download, see below |
 
-**`win-64`** goes through mingw-w64, which wraps the UCRT rather than
-replacing it, so `ucrtbase.dll` cannot be linked away: it *is* the C runtime.
-`libucrt.a` in zig's tree is not a static one despite the name, it is mingw's
-supplement of long double and complex math routines. `-static` leaves the
-import table untouched. What `-lucrtbase` does buy is resolving against
-`ucrtbase.dll` directly rather than against the dozen `api-ms-win-crt-*.dll`
-entries, which are only forwarders to it: twelve import table entries become
-two, with no change to which Windows versions run the binary, since both forms
-live in System32 from Windows 10 on and on 8.1 and earlier both arrive with the
-same UCRT update. Microsoft documents the API sets as the supported contract,
-so importing `ucrtbase.dll` directly sits outside that; delete the
-`link-flags` entry in `cmake/targets.json` to go back to them.
+mingw-w64 wraps the UCRT rather than replacing it, so `ucrtbase.dll` cannot be
+linked away: it *is* the C runtime there. `libucrt.a` in zig's tree is not a
+static one despite the name, it is mingw's supplement of long double and
+complex math routines, and `-static` leaves the import table untouched. Asking
+for `-lmsvcrt` does not help either; it only stacks `msvcrt.dll` on top of the
+`api-ms-win-crt-*` set that zig's startup objects reference anyway. So the
+mingw target was dropped and `win-64-msvc` is the only Windows target.
 
-**`win-64-msvc`** links Microsoft's own static CRT and so imports no C runtime
-at all, which is what makes it runnable on a Windows that has never seen the
-UCRT update. Those libraries only ship inside Visual Studio and the Windows
-SDK and are not redistributable, so they have to be fetched once:
+It links Microsoft's own static CRT and so imports no C runtime at all, which
+is what makes it runnable on a Windows that has never seen the UCRT update.
+The one `USER32.dll` import is `LoadStringA`, from the static CRT's error
+message path. `min-os` 6.0 is a real floor rather than a linker default: the
+CRT reaches for SRW locks, condition variables, the thread pool API and
+`CompareStringEx`, all of which arrived in Vista.
+
+Those libraries only ship inside Visual Studio and the Windows SDK and are not
+redistributable, so they have to be fetched once:
 
 ```sh
 python tools/xwin.py setup --accept-license
@@ -169,7 +168,7 @@ report "no work to do" against artifacts built for the old target.
 
 ```
 dist/crosszig-linux-64        dist/libcrosszig-linux-64.a
-dist/crosszig-win-64.exe      dist/libcrosszig-win-64.a
+dist/crosszig-win-64-msvc.exe dist/crosszig-win-64-msvc.lib
 dist/crosszig-osx-universal   dist/libcrosszig-osx-universal.a
 ```
 

@@ -16,12 +16,6 @@
             "processor": "arm64",
             "triple": "aarch64-macos.11.0-none"
         },
-        "win-64": {
-            "system": "Windows",
-            "processor": "AMD64",
-            "triple": "x86_64-windows-gnu",
-            "link-flags": "-lucrtbase"
-        },
         "win-64-msvc": {
             "system": "Windows",
             "processor": "AMD64",
@@ -111,17 +105,6 @@
             "format": "archive",
             "arch": "x86-64"
         },
-        "crosszig-win-64.exe": {
-            "platform": "win-64",
-            "format": "pe",
-            "arch": "x86-64",
-            "needs": [
-                "KERNEL32.dll",
-                "ucrtbase.dll"
-            ],
-            "min-os": "6.0",
-            "subsystem-version": "6.0"
-        },
         "libcrosszig-linux-64.a": {
             "platform": "linux-64",
             "format": "archive",
@@ -144,11 +127,6 @@
                     "arch": "x86-64"
                 }
             }
-        },
-        "libcrosszig-win-64.a": {
-            "platform": "win-64",
-            "format": "archive",
-            "arch": "x86-64"
         }
     }
 }

@@ -1,9 +1,9 @@
 # CMake toolchain file that drives `zig cc` / `zig c++` as a cross compiler.
 #
-#   cmake -B build/win-64 -S . -G Ninja \
-#         --toolchain cmake/ZigToolchain.cmake -DCROSSZIG_TARGET=win-64
+#   cmake -B build/win-64-msvc -S . -G Ninja \
+#         --toolchain cmake/ZigToolchain.cmake -DCROSSZIG_TARGET=win-64-msvc
 #
-# CROSSZIG_TARGET is one of the pixi platform names from pixi.toml. Because zig
+# CROSSZIG_TARGET is one of the platforms in targets.json. Because zig
 # ships the headers, the libc stubs and the runtime libraries for every target
 # it supports, the same host can produce binaries for all of them without any
 # extra SDK being installed.
@@ -20,7 +20,8 @@ list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
 
 if(NOT CROSSZIG_TARGET)
     message(FATAL_ERROR
-            "CROSSZIG_TARGET is not set. Pass -DCROSSZIG_TARGET=<linux-64|win-64|osx-64|osx-arm64>.")
+            "CROSSZIG_TARGET is not set. Pass -DCROSSZIG_TARGET=<one of the "
+            "platforms in cmake/targets.json>.")
 endif()
 
 # What each pixi platform maps onto lives in targets.json rather than here,
@@ -57,10 +58,10 @@ function(_crosszig_field out_var json field fallback)
     set(${out_var} "${_value}" PARENT_SCOPE)
 endfunction()
 
-# win-64 uses link-flags to resolve the C runtime against ucrtbase.dll directly
-# instead of against the api-ms-win-crt-* forwarders that all point at it
-# anyway, which turns a dozen import table entries into one without changing
-# which Windows versions the binary runs on.
+# Extra flags a single platform needs. win-64-msvc uses compile-flags to
+# silence the -nostdinc++ that some zig wrappers inject on their own; nothing
+# currently needs link-flags, but the hook stays because it is where a
+# platform specific library or linker option would go.
 _crosszig_field(_crosszig_link_flags    "${_crosszig_platform}" "link-flags"    "")
 _crosszig_field(_crosszig_compile_flags "${_crosszig_platform}" "compile-flags" "")
 _crosszig_field(_crosszig_sdk           "${_crosszig_platform}" "sdk"           "")

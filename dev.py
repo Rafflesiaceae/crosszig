@@ -6,7 +6,7 @@ produce binaries for any supported target:
 
     ./dev.py build                 # debug, for the host platform
     ./dev.py build -r -a           # release, for every supported platform
-    ./dev.py build -t win-64       # debug, for Windows only
+    ./dev.py build -t win-64-msvc  # debug, for Windows only
     ./dev.py run -r                # build for the host and run the binary
     ./dev.py dist                  # collect the release build of every platform
     ./dev.py dist-check ./dist     # check a directory against dist-manifest.json
@@ -62,7 +62,7 @@ def host_platform():
     if system == "Linux":
         return "linux-64"
     if system == "Windows":
-        return "win-64"
+        return "win-64-msvc"
     if system == "Darwin":
         return "osx-arm64" if platform.machine().lower() in ("arm64", "aarch64") else "osx-64"
     sys.exit(f"dev.py: unsupported host system '{system}'")
@@ -429,7 +429,8 @@ def command_run(args):
     config = config_name(args.release)
     build_one(target, config, jobs=args.jobs, verbose=args.verbose)
 
-    suffix = ".exe" if target == "win-64" else ""
+    _cpu, platforms = toolchain_targets()
+    suffix = ".exe" if platforms[target]["system"] == "Windows" else ""
     run([install_dir(target, config) / "bin" / f"crosszig{suffix}", *args.args])
 
 

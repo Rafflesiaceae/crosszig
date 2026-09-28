@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Fetches, unpacks and caches the MSVC CRT and the Windows SDK.
 
-The `win-64` target builds against mingw-w64, which wraps the UCRT and so
-leaves `ucrtbase.dll` in the import table. Getting a Windows binary with no C
-runtime dependency at all needs Microsoft's own static CRT (`libcmt.lib`,
-`libucrt.lib`, `libvcruntime.lib`), which only ships inside Visual Studio and
-the Windows SDK and cannot be redistributed by zig or by this repository.
+Getting a Windows binary with no C runtime dependency at all needs Microsoft's
+own static CRT (`libcmt.lib`, `libucrt.lib`, `libvcruntime.lib`), which only
+ships inside Visual Studio and the Windows SDK and cannot be redistributed by
+zig or by this repository. The mingw-w64 toolchain zig does bundle wraps the
+UCRT instead and always leaves `ucrtbase.dll` in the import table, which is
+why the Windows target builds against the MSVC ABI and needs this.
 
 `xwin` (https://github.com/Jake-Shadle/xwin) downloads those packages straight
 from Microsoft and rearranges them into a layout a cross compiler can use.

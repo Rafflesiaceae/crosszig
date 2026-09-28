@@ -6,12 +6,6 @@
             "processor": "x86_64",
             "triple": "x86_64-linux-gnu.2.3.3"
         },
-        "win-64": {
-            "system": "Windows",
-            "processor": "AMD64",
-            "triple": "x86_64-windows-gnu",
-            "link-flags": "-lucrtbase"
-        },
         "osx-64": {
             "system": "Darwin",
             "processor": "x86_64",

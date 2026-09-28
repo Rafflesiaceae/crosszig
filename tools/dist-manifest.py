@@ -1,16 +1,38 @@
-"""Reads the facts that decide where a built artifact will actually run.
+#!/usr/bin/env python3
+"""Records, checks and compares what a set of built artifacts depends on.
 
-`dist-check` has to inspect ELF, PE and Mach-O files from whichever host it
-happens to run on, and no system tool covers all three: readelf cannot read
-Mach-O, otool only exists on macOS, and a Windows host has neither. So instead
-of shelling out, the readers below walk each container far enough to recover
-its compatibility profile.
+A distribution manifest is a lock file for binaries. It pins, for every file
+shipped, the facts that decide where that file will actually run: the
+container format, the architecture, the shared libraries and symbol versions
+it needs, the minimum OS it declares. Regenerating it turns "the build
+changed" into a reviewable diff instead of a bug report from whoever has the
+oldest machine.
+
+Nothing here knows about any particular project. The five subcommands are:
+
+    dist-manifest.py show   <path>...            what these files depend on
+    dist-manifest.py record <dir>  -o FILE       lock a directory down
+    dist-manifest.py check  <dir>  -m FILE       assert it still matches
+    dist-manifest.py diff   <a> <b>              compare two of anything
+    dist-manifest.py fuse   <out> <in>...        build a universal binary
+
+and `record()`, `check()`, `diff()`, `profile()` and `write_universal()` are
+importable under the same names by a build script that would rather generate
+its policy than hand-write it.
+
+Reading the formats
+-------------------
+
+The files have to be inspected from whichever host happens to run the check,
+and no system tool covers all three containers: readelf cannot read Mach-O,
+otool only exists on macOS, and a Windows host has neither. So instead of
+shelling out, the readers below walk each container themselves.
 
 `profile()` is the entry point. Which keys come back depends on the format,
 because the formats genuinely record different things:
 
     all                format, arch
-    elf                needs, symbol-versions, runpath, min-kernel
+    elf                needs, symbol-versions, runpath, min-kernel, interpreter
     pe                 needs, imports, min-os, subsystem-version
     macho              needs, dylib-compat, rpath, macos-min, code-signature
     archive            cxx-runtime
@@ -20,22 +42,69 @@ because the formats genuinely record different things:
 `arch` is a string everywhere except for a universal binary, where it is the
 sorted list of the architectures the file carries.
 
-`write_universal()` goes the other way and assembles such a file. It lives here
-because the universal macOS artifact has to be produced on hosts that have no
-`lipo`, which is every host except macOS itself.
-
 Dependency names are whatever the format itself stores: a soname for ELF
 (`libc.so.6`), an import table entry for PE (`KERNEL32.dll`), an install name
 for Mach-O (`/usr/lib/libSystem.B.dylib`).
 
 One thing deliberately absent: the CPU baseline the code was generated for.
 Nothing in any of these containers records it unless the toolchain emits a
-`.note.gnu.property` marker, and ours does not, so that has to be pinned at
+`.note.gnu.property` marker, and most do not, so that has to be pinned at
 build time instead of checked afterwards.
+
+The manifest
+------------
+
+    {
+        "schema": "dist-manifest/1",
+        "metadata": {...},              opaque to this tool, compared verbatim
+        "require-rule-coverage": true,  every file must be claimed by a rule
+        "rules": [...],                 see below
+        "files": {"<relative path>": {<profile>}}
+    }
+
+Recording the profiles alone is not enough. A manifest regenerated from a
+broken build records the breakage and then happily agrees with itself, so the
+rules are the half that does not come from the artifacts: they say what has to
+be true no matter what was measured.
+
+    {
+        "name": "linux-64",                        used in problem messages
+        "match": ["*-linux-64", "*-linux-64.*"],   globs over the file name
+        "slice": "x86-64",                         optional, see below
+        "when":    {"format": {"is": "elf"}},      skip the rule unless met
+        "require": {"symbol-versions.GLIBC": {"at-most": "2.3.3"}}
+    }
+
+Keys in `when` and `require` are dotted paths into the profile. A condition is
+either a plain value, meaning equality, or a map of these operators, all of
+which have to hold:
+
+    is          equal to this value
+    is-version  the same version, however many components it is written with
+    one-of      equal to one of these values
+    at-most     version no higher than this, compared componentwise
+    at-least    version no lower than this
+    empty       true: absent, or an empty string/list/map. false: the reverse
+    present     whether the key is there at all
+    subset-of   every element (or map key) appears in this list
+    contains    every one of these appears among the elements
+    matches     the value, as a string, fully matches this regular expression
+
+A key that is absent fails every condition except `{"empty": true}` and
+`{"present": false}`, so a typo in a key name is reported rather than quietly
+passing. Use `when` to scope a rule to the files it can apply to.
+
+`slice` narrows a rule to one architecture of a universal file. A thin file
+counts as a single slice named after its own architecture, so one rule shape
+covers both, and a rule naming a slice its file does not carry is a failure.
 """
 
+import argparse
+import fnmatch
+import json
 import re
 import struct
+import sys
 from pathlib import Path
 
 
@@ -702,3 +771,443 @@ def _member_arch(member):
             return _PE_MACHINES[machine]
 
     return None
+
+
+# --------------------------------------------------------------------------
+# Manifests
+# --------------------------------------------------------------------------
+
+SCHEMA = "dist-manifest/1"
+
+# The keys a caller may put in a manifest besides the recorded files. They are
+# kept apart from `files` so that a policy can be carried from one manifest to
+# the next while the profiles underneath it are regenerated.
+POLICY_KEYS = ("metadata", "require-rule-coverage", "rules")
+
+
+def contents(directory):
+    """Every regular file under `directory`, keyed by its relative path."""
+    directory = Path(directory)
+    return {path.relative_to(directory).as_posix(): path
+            for path in sorted(directory.rglob("*")) if path.is_file()}
+
+
+def record(directory, policy=None):
+    """Locks a directory down: the given policy plus a profile of every file.
+
+    Reading a file that is not a binary at all is left to fail, because a
+    manifest that silently skipped what it could not parse would go on
+    claiming the directory was fully described.
+    """
+    manifest = {"schema": SCHEMA}
+    for key in POLICY_KEYS:
+        if policy and key in policy:
+            manifest[key] = policy[key]
+    manifest["files"] = {name: profile(path)
+                         for name, path in contents(directory).items()}
+    return manifest
+
+
+def check(directory, manifest, policy=None):
+    """Asserts `directory` against `manifest`. Returns the list of problems.
+
+    Three separate things are checked, and they fail in different ways on
+    purpose. Every recorded file has to still read back byte-identical facts,
+    which catches a changed build. Every rule has to hold against the profiles
+    read now rather than against the recorded ones, which is what still fails
+    after someone has regenerated the manifest from a broken build. And when
+    the caller generates its policy, `policy` is compared against the one in
+    the manifest, which catches a manifest written before the generator
+    changed.
+    """
+    problems = []
+
+    found_schema = manifest.get("schema")
+    if found_schema != SCHEMA:
+        return [f"manifest schema is {found_schema!r}, this tool speaks {SCHEMA!r}"]
+
+    if policy is not None:
+        for key in POLICY_KEYS:
+            problems += _differences(key, manifest.get(key), policy.get(key),
+                                     ("manifest", "policy"))
+
+    rules = manifest.get("rules", [])
+    present = contents(directory)
+
+    for name, recorded in sorted(manifest.get("files", {}).items()):
+        path = present.get(name)
+        if path is None:
+            problems.append(f"{name}: missing")
+            continue
+
+        try:
+            found = profile(path)
+        except (UnknownFormat, OSError, ValueError, struct.error) as error:
+            problems.append(f"{name}: {error}")
+            continue
+
+        problems += _differences(name, recorded, found, ("manifest", "file"))
+
+        claimed = False
+        for rule in rules:
+            matched, failures = _apply_rule(name, found, rule)
+            claimed = claimed or matched
+            problems += failures
+        if manifest.get("require-rule-coverage") and not claimed:
+            problems.append(f"{name}: no rule in the manifest claims this file")
+
+    for name in present:
+        if name not in manifest.get("files", {}):
+            problems.append(f"{name}: present but not listed in the manifest")
+
+    # Two rules about the same slice of the same file report a missing slice
+    # identically, and saying it twice adds nothing. Every message names the
+    # file it is about, so equal text really is the same finding.
+    return list(dict.fromkeys(problems))
+
+
+def diff(left, right):
+    """Compares two manifests, two directories or two single binaries.
+
+    Either side may be any of the three, so a directory of fresh builds can be
+    held against a manifest from a release, or one project's binary against
+    another's.
+    """
+    left_files, left_name = _side(left)
+    right_files, right_name = _side(right)
+
+    # Two single files are the interesting cross-project case, and there their
+    # names almost never agree, so they are paired up positionally instead.
+    if len(left_files) == 1 and len(right_files) == 1:
+        only_left, = left_files.values()
+        only_right, = right_files.values()
+        return _differences("", only_left, only_right, (left_name, right_name))
+
+    problems = []
+    for name in sorted(set(left_files) | set(right_files)):
+        if name not in left_files:
+            problems.append(f"{name}: only in {right_name}")
+        elif name not in right_files:
+            problems.append(f"{name}: only in {left_name}")
+        else:
+            problems += _differences(name, left_files[name], right_files[name],
+                                     (left_name, right_name))
+    return problems
+
+
+def _side(source):
+    """One side of a diff as (profiles by name, what to call it)."""
+    path = Path(source)
+    if path.is_dir():
+        return ({name: profile(found) for name, found in contents(path).items()},
+                path.name or str(path))
+
+    # A manifest is the only JSON this tool reads, so the suffix is enough to
+    # tell it from a binary that happens to be passed alongside one.
+    if path.suffix == ".json":
+        return json.loads(path.read_text()).get("files", {}), path.name
+
+    return {path.name: profile(path)}, path.name
+
+
+def _differences(label, left, right, names):
+    """Every leaf at which `left` and `right` disagree, one problem each.
+
+    Descending rather than printing the two sides whole is what keeps a
+    changed glibc ceiling from arriving as a screenful of unchanged rules.
+    """
+    if isinstance(left, dict) and isinstance(right, dict):
+        problems = []
+        for key in sorted(set(left) | set(right)):
+            where = f"{label}.{key}" if label else key
+            if key not in left:
+                problems.append(f"{where}: only {names[1]} has it, {right[key]!r}")
+            elif key not in right:
+                problems.append(f"{where}: only {names[0]} has it, {left[key]!r}")
+            else:
+                problems += _differences(where, left[key], right[key], names)
+        return problems
+
+    if isinstance(left, list) and isinstance(right, list):
+        # A list of plain values is a set of facts, where saying what came and
+        # went reads far better than a positional diff. A list of maps is an
+        # ordered structure, so that one is walked position by position.
+        if all(not isinstance(item, (dict, list)) for item in left + right):
+            return _list_differences(label, left, right, names)
+
+        problems = []
+        for index in range(max(len(left), len(right))):
+            where = f"{label}[{index}]"
+            if index >= len(left):
+                problems.append(f"{where}: only {names[1]} has it, {right[index]!r}")
+            elif index >= len(right):
+                problems.append(f"{where}: only {names[0]} has it, {left[index]!r}")
+            else:
+                problems += _differences(where, left[index], right[index], names)
+        return problems
+
+    if left != right:
+        where = f"{label}: " if label else ""
+        return [f"{where}{names[0]} has {left!r}, {names[1]} has {right!r}"]
+    return []
+
+
+def _list_differences(label, left, right, names):
+    gone = [item for item in left if item not in right]
+    added = [item for item in right if item not in left]
+
+    problems = []
+    if gone:
+        problems.append(f"{label}: only {names[0]} has {gone!r}")
+    if added:
+        problems.append(f"{label}: only {names[1]} has {added!r}")
+    # Search paths are consulted in the order they are stored, so a reordering
+    # with the same entries is still a difference and has to be said out loud.
+    if not problems and left != right:
+        problems.append(f"{label}: the same entries in a different order")
+    return problems
+
+
+# --------------------------------------------------------------------------
+# Rules
+# --------------------------------------------------------------------------
+
+def _apply_rule(name, found, rule):
+    """Runs one rule over one profile: (did it match the file, problems)."""
+    patterns = rule.get("match", "*")
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    if not any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
+        return False, []
+
+    label = name
+    if "name" in rule:
+        label += f" ({rule['name']})"
+
+    target = found
+    if "slice" in rule:
+        label += f" [{rule['slice']}]"
+        # A thin file is treated as its own single slice so that per-slice and
+        # whole-file rules are written the same way.
+        slices = found.get("slices") or {found.get("arch"): found}
+        if rule["slice"] not in slices:
+            return True, [f"{label}: the file carries no such slice"]
+        target = slices[rule["slice"]]
+
+    # `when` is a guard rather than an assertion: an unmet one means the rule
+    # has nothing to say about this file, which is how a rule about ELF images
+    # is kept off the static library sitting next to them.
+    for key, condition in sorted(rule.get("when", {}).items()):
+        if _condition_problems(key, target, condition):
+            return True, []
+
+    problems = []
+    for key, condition in sorted(rule.get("require", {}).items()):
+        problems += [f"{label}: {failure}"
+                     for failure in _condition_problems(key, target, condition)]
+    return True, problems
+
+
+def _lookup(profile_data, key):
+    """Follows a dotted key such as `symbol-versions.GLIBC` into a profile."""
+    current = profile_data
+    for part in key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def _condition_problems(key, target, condition):
+    """Every way one `require` or `when` entry is not satisfied."""
+    # A condition that is not a map is the value itself, which is what makes
+    # the common case read as `"format": "elf"`.
+    if not isinstance(condition, dict):
+        condition = {"is": condition}
+
+    found, value = _lookup(target, key)
+    problems = []
+    for operator, expected in sorted(condition.items()):
+        problems += _operator_problems(key, operator, found, value, expected)
+    return problems
+
+
+def _operator_problems(key, operator, found, value, expected):
+    # The two conditions that are about absence come first, because they are
+    # the only ones a missing key can satisfy.
+    if operator == "present":
+        if found != bool(expected):
+            return [f"{key} is {'present' if found else 'absent'}"]
+        return []
+
+    if operator == "empty":
+        if (not found or not value) != bool(expected):
+            return [f"{key} is {value!r}, wanted "
+                    f"{'nothing' if expected else 'something'}"]
+        return []
+
+    if not found:
+        return [f"{key} is not recorded at all, so {operator} {expected!r} "
+                f"cannot hold"]
+
+    if operator == "is":
+        return [] if value == expected else [f"{key} is {value!r}, wanted {expected!r}"]
+
+    if operator == "one-of":
+        return [] if value in expected else \
+            [f"{key} is {value!r}, wanted one of {expected!r}"]
+
+    if operator in ("at-most", "at-least", "is-version"):
+        try:
+            actual, limit = version_tuple(str(value)), version_tuple(str(expected))
+        except ValueError:
+            return [f"{key} is {value!r}, which is not a version {operator} "
+                    f"{expected!r} could be compared against"]
+        # `10.12` and `10.12.0` are the same floor written two ways, and which
+        # of the two a container stores is the container's business, so these
+        # compare the padded tuples rather than the text.
+        if operator == "at-most" and actual > limit:
+            return [f"{key} is {value}, above the permitted {expected}"]
+        if operator == "at-least" and actual < limit:
+            return [f"{key} is {value}, below the required {expected}"]
+        if operator == "is-version" and actual != limit:
+            return [f"{key} is {value}, wanted {expected}"]
+        return []
+
+    if operator == "subset-of":
+        extra = sorted(set(_elements(value)) - set(expected))
+        return [f"{key} has {extra!r}, which {expected!r} does not allow"] if extra else []
+
+    if operator == "contains":
+        missing = sorted(set(expected) - set(_elements(value)))
+        return [f"{key} is missing {missing!r}"] if missing else []
+
+    if operator == "matches":
+        return [] if re.fullmatch(expected, str(value)) else \
+            [f"{key} is {value!r}, which does not match {expected!r}"]
+
+    raise ValueError(f"unknown condition {operator!r} on {key}")
+
+
+def _elements(value):
+    """What `subset-of` and `contains` compare: a map's keys, a list's items."""
+    if isinstance(value, dict):
+        return list(value)
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+# --------------------------------------------------------------------------
+# Command line
+# --------------------------------------------------------------------------
+
+def _report(problems, heading):
+    """Prints the problems, if any, and returns the process exit status."""
+    if not problems:
+        return 0
+    # The commands print to stdout before calling this; without the flush the
+    # two streams arrive interleaved whenever either one is redirected.
+    sys.stdout.flush()
+    print(heading, file=sys.stderr)
+    for problem in problems:
+        print(f"  {problem}", file=sys.stderr)
+    return 1
+
+
+def _load_policy(source):
+    """The policy out of a policy file or out of an existing manifest."""
+    data = json.loads(Path(source).read_text())
+    return {key: data[key] for key in POLICY_KEYS if key in data}
+
+
+def _command_show(args):
+    print(json.dumps({str(path): profile(path) for path in args.path}, indent=4))
+    return 0
+
+
+def _command_record(args):
+    policy = _load_policy(args.policy) if args.policy else None
+    manifest = record(args.directory, policy)
+    text = json.dumps(manifest, indent=4) + "\n"
+    if args.output:
+        Path(args.output).write_text(text)
+        print(f"wrote {len(manifest['files'])} files to {args.output}")
+    else:
+        print(text, end="")
+
+    # Locking down artifacts that already break the policy would write the
+    # breakage into the lock file, so it is reported straight away.
+    return _report(check(args.directory, manifest),
+                   f"\nrecorded, but {args.directory} does not satisfy its own rules")
+
+
+def _command_check(args):
+    manifest = json.loads(Path(args.manifest).read_text())
+    status = _report(check(args.directory, manifest),
+                     f"\n{args.directory} does not match {args.manifest}")
+    if status == 0:
+        print(f"ok: {len(manifest.get('files', {}))} files in {args.directory}")
+    return status
+
+
+def _command_diff(args):
+    problems = diff(args.left, args.right)
+    for problem in problems:
+        print(problem)
+    if not problems:
+        print("identical")
+    return 0
+
+
+def _command_fuse(args):
+    write_universal(args.input, args.output)
+    print(json.dumps(profile(args.output), indent=4))
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    show = subparsers.add_parser("show", help="print what the given files depend on")
+    show.add_argument("path", nargs="+", type=Path)
+    show.set_defaults(func=_command_show)
+
+    record_parser = subparsers.add_parser(
+        "record", help="write a manifest describing every file in a directory")
+    record_parser.add_argument("directory", type=Path)
+    record_parser.add_argument("-o", "--output", help="write here instead of stdout")
+    record_parser.add_argument("--policy",
+                               help="take metadata and rules from this manifest "
+                                    "or policy file instead of writing none")
+    record_parser.set_defaults(func=_command_record)
+
+    check_parser = subparsers.add_parser(
+        "check", help="assert a directory against a manifest")
+    check_parser.add_argument("directory", type=Path)
+    check_parser.add_argument("-m", "--manifest", required=True)
+    check_parser.set_defaults(func=_command_check)
+
+    diff_parser = subparsers.add_parser(
+        "diff", help="compare two manifests, directories or binaries")
+    diff_parser.add_argument("left")
+    diff_parser.add_argument("right")
+    diff_parser.set_defaults(func=_command_diff)
+
+    fuse = subparsers.add_parser(
+        "fuse", help="combine thin Mach-O images or archives into a universal file")
+    fuse.add_argument("output")
+    fuse.add_argument("input", nargs="+")
+    fuse.set_defaults(func=_command_fuse)
+
+    args = parser.parse_args()
+    try:
+        return args.func(args)
+    except (UnknownFormat, OSError, ValueError) as error:
+        sys.exit(f"dist-manifest.py: {error}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

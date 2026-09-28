@@ -19,6 +19,14 @@ installed on the machine beyond the pixi environment.
 ./dev.py clean              # remove build/ and dist/
 ```
 
+`tools/dist-manifest.py` is a standalone script and works on its own, on any
+binary from any project:
+
+```sh
+./tools/dist-manifest.py show /usr/bin/ls   # what it depends on, as JSON
+./tools/dist-manifest.py diff a.so b.so     # how two of them differ
+```
+
 `dev.py` re-executes itself through `pixi run` when `cmake`, `ninja` or `zig`
 are not already on `PATH`, so it works both inside and outside an activated
 environment. Build trees end up in `build/<platform>-<config>/` and each one
@@ -35,8 +43,8 @@ installs into `build/<platform>-<config>/install/`.
 | `tools/xwin.py`           | Fetches and caches Microsoft's CRT and SDK for the Windows targets |
 | `cmake/Dependencies.cmake`| Fetches Boost and shares one checkout across all platforms    |
 | `dev.py`                  | Thin cross-platform wrapper around the CMake commands         |
-| `tools/binfmt.py`         | Reads compatibility facts out of ELF, PE and Mach-O files     |
-| `dist-manifest.json`      | The expected content of a distribution                        |
+| `tools/dist-manifest.py`  | Standalone lock-file tool for binaries: reads ELF, PE and Mach-O |
+| `dist-manifest.json`      | The lock file it keeps for this project's distribution        |
 
 `src/` produces two things:
 
@@ -188,36 +196,88 @@ section of `cmake/targets.json` says which platform builds get folded together:
 ```
 
 Those platforms are still built separately, they are just not copied out on
-their own. Assembling the container is `binfmt.write_universal()` rather than
-`lipo`, because `lipo` only exists on macOS and this has to work on every host.
-It handles static libraries as well, which Apple wraps in the very same format.
+their own. Assembling the container is `tools/dist-manifest.py fuse` rather
+than `lipo`, because `lipo` only exists on macOS and this has to work on every
+host. It handles static libraries too, which Apple wraps in the same format.
 
 It then verifies the result against `dist-manifest.json` and fails if anything
 is off. `./dev.py dist-check <dir>` runs the same verification on its own, so a
 distribution can also be checked after the fact, for instance once it has been
 unpacked somewhere else.
 
-The manifest records two things: the build inputs, including which artifacts
-are assembled out of several of them, and a profile of every file collected.
+### The manifest tool
+
+`tools/dist-manifest.py` is a standalone script, and it knows nothing about
+crosszig. A distribution manifest is a lock file for binaries: it pins, for
+every file shipped, the facts that decide where that file will actually run.
+Regenerating it turns "the build changed" into a reviewable diff instead of a
+bug report from whoever has the oldest machine.
+
+```
+tools/dist-manifest.py show   <path>...       what these files depend on
+tools/dist-manifest.py record <dir>  -o FILE  lock a directory down
+tools/dist-manifest.py check  <dir>  -m FILE  assert it still matches
+tools/dist-manifest.py diff   <a> <b>         compare two of anything
+tools/dist-manifest.py fuse   <out> <in>...   build a universal binary
+```
+
+`diff` takes a manifest, a directory or a single binary on either side, so a
+fresh build can be held against a released manifest, or one project's binary
+against a completely unrelated one:
+
+```
+$ ./tools/dist-manifest.py diff dist/crosszig-linux-64 ~/Downloads/omni-bot/omnibot_et.x86_64.so
+interpreter: crosszig-linux-64 has '/lib64/ld-linux-x86-64.so.2', omnibot_et.x86_64.so has None
+needs: only omnibot_et.x86_64.so has ['libgcc_s.so.1', 'libstdc++.so.6']
+symbol-versions.GLIBC: crosszig-linux-64 has '2.3.3', omnibot_et.x86_64.so has '2.3'
+```
+
+A manifest holds an opaque `metadata` block, a list of `rules`, and a profile
+of every file:
 
 ```json
 {
-    "cpu": "baseline",
-    "targets": { "linux-64": { "triple": "x86_64-linux-gnu.2.3.3", "...": "..." } },
-    "universal": { "osx-universal": ["osx-64", "osx-arm64"] },
+    "schema": "dist-manifest/1",
+    "metadata": { "cpu": "baseline", "targets": { "...": "..." } },
+    "require-rule-coverage": true,
+    "rules": [
+        {
+            "name": "linux-64",
+            "match": ["*-linux-64", "*-linux-64.*"],
+            "slice": "x86-64",
+            "when":    { "format": "elf" },
+            "require": { "symbol-versions.GLIBC": { "at-most": "2.3.3" } }
+        }
+    ],
     "files": {
         "crosszig-linux-64": {
-            "platform": "linux-64",
             "format": "elf",
             "arch": "x86-64",
             "needs": ["libc.so.6", "..."],
             "symbol-versions": { "GLIBC": "2.3.3" },
             "runpath": [],
+            "interpreter": "/lib64/ld-linux-x86-64.so.2",
             "min-kernel": "2.0.0"
         }
     }
 }
 ```
+
+Recording the profiles alone would not be enough. A manifest regenerated from
+a broken build records the breakage and then happily agrees with itself, so
+the rules are the half that does *not* come from the artifacts: they say what
+has to be true no matter what was measured. Keys in `when` and `require` are
+dotted paths into a profile, and a condition is either a plain value, meaning
+equality, or a map of `is`, `is-version`, `one-of`, `at-most`, `at-least`,
+`empty`, `present`, `subset-of`, `contains` and `matches`. A key that is
+absent fails every condition except `{"empty": true}` and `{"present":
+false}`, so a typo in a key name is reported rather than quietly passing;
+`when` is the guard that scopes a rule to the files it can apply to.
+
+`slice` narrows a rule to one architecture of a universal file. A thin file
+counts as a single slice named after its own architecture, so one rule shape
+covers both cases, and that is how the two macOS slices are held to different
+floors.
 
 Which profile keys appear depends on the format, because the formats record
 genuinely different things:
@@ -233,10 +293,12 @@ genuinely different things:
 | `archive-universal` | `slices`, one `archive` profile per architecture                  |
 
 `arch` is a string everywhere except on a universal file, where it is the
-sorted list of architectures it carries and has to match the set of platforms
-the artifact is assembled from exactly, so that a missing or a stray slice both
-show up. Each slice is then checked against the triple of the platform it came
-from, which is how the two macOS slices can be held to different floors.
+sorted list of architectures it carries, and `slices` holds one full profile
+per architecture.
+
+The formats are read by the script itself rather than by
+`readelf`/`objdump`/`otool`, because no single one of those reads all
+three and a given host generally has at most one of them.
 
 Dependency names are whatever the container itself stores: a soname for ELF
 (`libc.so.6`), an import table entry for PE (`KERNEL32.dll`), an install name
@@ -263,15 +325,28 @@ real compatibility question open:
   about which one it was built against, so a consumer that assumes wrong only
   finds out at link time.
 
-`dist-check` then asserts three separate things:
+### What this project asks of it
 
-1. **The build inputs still match `cmake/targets.json`.** Retargeting a
-   platform, or changing its link flags, cannot go unnoticed.
+Everything crosszig-specific about `dist-manifest.json` is generated by
+`manifest_policy()` in `dev.py` out of `cmake/targets.json`. The metadata is
+the build inputs recorded verbatim; the rules are derived from each zig
+triple, so retargeting a platform rewrites its rules along with its triple
+instead of leaving a stale one behind. `./dev.py dist` then hands that policy
+back in when it checks, which is what makes a manifest written before the
+targets changed fail rather than enforce yesterday's rules.
+
+`dist-check` then asserts three separate things, and they fail in different
+ways on purpose:
+
+1. **The generated policy still matches the one in the manifest.**
+   Retargeting a platform, or changing its link flags, cannot go unnoticed.
 2. **Every file is present and reads back exactly its recorded profile.** Any
-   file in the directory that the manifest does not mention is reported too.
-3. **Every profile satisfies the invariants implied by its zig triple.** This
-   is the part that still catches a bad build after someone has regenerated
-   the manifest from it:
+   file in the directory that the manifest does not mention is reported too,
+   and so is any file no rule claims, since everything shipped here belongs
+   to one of our platforms.
+3. **Every rule holds against the profiles read now**, not against the
+   recorded ones. This is the part that still catches a bad build after
+   someone has regenerated the manifest from it:
    - the architectures have to be exactly the ones the triples name, so an
      `osx-arm64` slot cannot quietly hold an x86-64 binary and a universal
      file cannot quietly lose a slice,
@@ -282,17 +357,13 @@ real compatibility question open:
    - `runpath` / `rpath` have to be empty, since a non-empty one means a build
      directory leaked into the artifact.
 
-Reading those formats is done by `tools/binfmt.py` rather than by
-`readelf`/`objdump`/`otool`, because no single one of those reads all three
-and a given host generally has at most one of them.
-
 One thing deliberately *not* checked: the CPU baseline the code was generated
 for. Nothing in any of these containers records it unless the toolchain emits
 a `.note.gnu.property` marker, and ours does not, so an `-march=native` leak
 would build cleanly, pass every check here, and only fail on an older CPU at
 runtime. That is why `cpu` is pinned in `cmake/targets.json` and passed to zig
-explicitly, and why the manifest records it as provenance rather than as
-something read back from the files.
+explicitly, and why the manifest records it under `metadata` as provenance
+rather than as something read back from the files.
 
 `dist` deliberately only handles the release build: a debug binary picks up
 extra imports (`ntdll.dll` on Windows, for one), so a single manifest could not

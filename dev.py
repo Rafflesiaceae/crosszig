@@ -14,6 +14,7 @@ produce binaries for any supported target:
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import platform
@@ -23,14 +24,32 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tools import binfmt
-
 ROOT = Path(__file__).resolve().parent
 BUILD_ROOT = ROOT / "build"
 DIST_DIR = ROOT / "dist"
 MANIFEST = ROOT / "dist-manifest.json"
 TOOLCHAIN = ROOT / "cmake" / "ZigToolchain.cmake"
 TARGETS = ROOT / "cmake" / "targets.json"
+
+
+def load_tool(file_name):
+    """Imports a script out of tools/ whose name is not a module name.
+
+    The tools there are deliberately standalone: each one is a single file
+    that runs on its own and can be copied into another project unchanged,
+    which rules out the hyphen-free names a plain import would need. That
+    costs this helper and nothing else.
+    """
+    path = ROOT / "tools" / file_name
+    spec = importlib.util.spec_from_file_location(path.stem.replace("-", "_"), path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Everything this script knows about reading binaries. It is a general tool:
+# what makes it check *our* artifacts is the policy generated below.
+dist_manifest = load_tool("dist-manifest.py")
 
 # The one place the platforms are spelled out is cmake/targets.json, which the
 # toolchain file reads as well.
@@ -43,7 +62,7 @@ GROUPED = {member for members in UNIVERSAL.values() for member in members}
 ARTIFACTS = sorted((set(PLATFORMS) - GROUPED) | set(UNIVERSAL))
 
 # What the leading component of a zig triple says the architecture will be,
-# named the way tools/binfmt.py reports it.
+# named the way tools/dist-manifest.py reports it.
 ARCH_BY_TRIPLE = {"x86_64": "x86-64", "aarch64": "arm64", "x86": "x86", "arm": "arm"}
 
 # Set once we have re-executed ourselves inside the pixi environment, so that
@@ -211,199 +230,119 @@ def toolchain_targets():
     return data["cpu"], data["platforms"]
 
 
-def platform_of(name):
-    """Which artifact a collected file belongs to, from its name suffix.
-
-    That is a platform for a file shipped on its own and a group name such as
-    `osx-universal` for one assembled out of several platform builds.
-    """
-    stem = Path(name).stem
-    for candidate in ARTIFACTS:
-        if stem.endswith(f"-{candidate}"):
-            return candidate
-    return None
-
-
-def artifact_targets(name, platforms):
-    """The platform entries a collected file has to satisfy.
-
-    One for a file built for a single platform, one per slice for a universal
-    one, and none at all when the name matches nothing we build.
-    """
-    artifact = platform_of(name)
-    if artifact in UNIVERSAL:
-        return [platforms[member] for member in UNIVERSAL[artifact]
-                if member in platforms]
-    entry = platforms.get(artifact)
-    return [entry] if entry else []
-
-
 def dist_name(path, target):
     """`libcrosszig.a` for osx-arm64 becomes `libcrosszig-osx-arm64.a`."""
     return f"{path.stem}-{target}{path.suffix}"
 
 
-def file_profile(path):
-    """The recorded description of one collected file."""
-    return {"platform": platform_of(path.name), **binfmt.profile(path)}
-
-
-def build_manifest(directory):
-    """Describes `directory` the way dist-manifest.json records it."""
-    cpu, platforms = toolchain_targets()
-    return {
-        "cpu": cpu,
-        "targets": dict(sorted(platforms.items())),
-        "universal": {name: sorted(members) for name, members in sorted(UNIVERSAL.items())},
-        "files": {
-            path.name: file_profile(path)
-            for path in sorted(directory.iterdir())
-            if path.is_file()
-        },
-    }
-
-
-def compare_profile(name, recorded, found):
-    """Reports every way the profile read back differs from the recorded one."""
-    problems = []
-    for key in sorted(set(recorded) | set(found)):
-        if key not in recorded:
-            problems.append(f"{name}: {key} appeared, now {found[key]!r}")
-        elif key not in found:
-            problems.append(f"{name}: {key} is gone, manifest has {recorded[key]!r}")
-        elif recorded[key] != found[key]:
-            problems.append(f"{name}: {key} is {found[key]!r}, manifest says {recorded[key]!r}")
-    return problems
-
-
-def check_search_paths(label, found):
-    """Nothing here should carry a library search path; one means a build
-    directory leaked into the artifact."""
-    return [f"{label}: {key} is not empty: {found[key]}"
-            for key in ("runpath", "rpath") if found.get(key)]
-
-
-def check_image(label, found, triple):
-    """The rules for one thin image, checked against the triple that built it."""
-    problems = check_search_paths(label, found)
-
-    if found.get("format") == "elf":
-        ceiling = re.search(r"-gnu\.([0-9][0-9.]*)$", triple)
-        needed = found.get("symbol-versions", {}).get("GLIBC")
-        if ceiling and needed and \
-                binfmt.version_tuple(needed) > binfmt.version_tuple(ceiling.group(1)):
-            problems.append(
-                f"{label}: needs glibc {needed}, above the targeted {ceiling.group(1)}")
-
-    if found.get("format") == "macho":
-        floor = re.search(r"-macos\.([0-9][0-9.]*)-", triple)
-        declared = found.get("macos-min")
-        if floor and (declared is None or
-                      binfmt.version_tuple(declared) != binfmt.version_tuple(floor.group(1))):
-            problems.append(f"{label}: declares macOS {declared}, "
-                            f"but {triple} targets {floor.group(1)}")
-
-        # arm64 macOS will not execute an unsigned binary at all.
-        if found.get("arch", "").startswith("arm64") and not found.get("code-signature"):
-            problems.append(f"{label}: arm64 macOS binary carries no code signature")
-
-    return problems
-
-
 def arch_of_triple(triple):
-    """What binfmt.py will call the architecture the triple names."""
+    """What tools/dist-manifest.py calls the architecture a triple names."""
     leading = triple.split("-")[0]
     return ARCH_BY_TRIPLE.get(leading, leading)
 
 
-def check_invariants(name, found, targets):
-    """Checks the profile against the build inputs rather than against the
-    manifest, so that a manifest regenerated from a broken build still fails.
+def member_rules(member, triple, match):
+    """The manifest rules for the image one zig triple produced.
 
-    `targets` is the list of platform entries the file has to satisfy: one for
-    a plain artifact, one per slice for a universal one.
+    They are written against a named slice, which for a file that is not
+    universal is the file itself, so that both cases come out the same shape.
     """
-    if not targets:
-        return [f"{name}: no known platform in the file name"]
+    common = {"name": member, "match": match, "slice": arch_of_triple(triple)}
 
-    problems = []
-    by_arch = {arch_of_triple(entry["triple"]): entry["triple"] for entry in targets}
+    # A search path baked into a shipped artifact means a build directory
+    # leaked into it. An archive records none at all, which `empty` allows.
+    rules = [{**common, "require": {"runpath": {"empty": True},
+                                    "rpath": {"empty": True}}}]
 
-    # A universal file reports the list of architectures it carries; a thin one
-    # reports the single string. Either way it has to be exactly the set the
-    # targets ask for, so that a missing or a stray slice both show up.
-    architectures = found.get("arch")
-    if not isinstance(architectures, list):
-        architectures = [architectures]
-    if sorted(architectures) != sorted(by_arch):
-        problems.append(f"{name}: carries {sorted(architectures)}, "
-                        f"but its targets ask for {sorted(by_arch)}")
+    glibc = re.search(r"-gnu\.([0-9][0-9.]*)$", triple)
+    if glibc:
+        rules.append({
+            **common,
+            "when": {"format": "elf"},
+            "require": {"symbol-versions.GLIBC": {"at-most": glibc.group(1)}},
+        })
 
-    # A thin file is treated as its own single slice, so both go through the
-    # same per-image rules below.
-    slices = found.get("slices") or {architectures[0]: found}
-    for arch, image in sorted(slices.items()):
-        triple = by_arch.get(arch)
-        if triple is None:
-            continue  # already reported as an unexpected architecture above
-        label = name if len(slices) == 1 else f"{name} [{arch}]"
-        problems += check_image(label, image, triple)
+    macos = re.search(r"-macos\.([0-9][0-9.]*)-", triple)
+    if macos:
+        # Exactly the targeted floor, not merely at or above it: a higher one
+        # is a build that quietly stopped supporting the machines we claim.
+        require = {"macos-min": {"is-version": macos.group(1)}}
+        # arm64 macOS will not execute an unsigned binary at all.
+        if common["slice"] == "arm64":
+            require["code-signature"] = True
+        rules.append({**common, "when": {"format": "macho"}, "require": require})
 
-    return problems
+    return rules
+
+
+def artifact_rules(artifact, platforms):
+    """The manifest rules for one shipped file name suffix.
+
+    `crosszig-linux-64` and `libcrosszig-linux-64.a` both belong to linux-64,
+    and nothing else collected into dist/ ends that way.
+    """
+    members = UNIVERSAL.get(artifact, [artifact])
+    triples = [platforms[member]["triple"] for member in members]
+    match = [f"*-{artifact}", f"*-{artifact}.*"]
+    arches = sorted(arch_of_triple(triple) for triple in triples)
+
+    # The architectures have to be exactly these rather than merely include
+    # them, so that a lost slice and a stray one both show up.
+    rules = [{
+        "name": artifact,
+        "match": match,
+        "require": {"arch": arches[0] if len(arches) == 1 else arches},
+    }]
+
+    for member, triple in zip(members, triples):
+        rules += member_rules(member, triple, match)
+    return rules
+
+
+def manifest_policy():
+    """What tools/dist-manifest.py enforces on our dist/, generated from
+    cmake/targets.json.
+
+    This function is the whole of what is crosszig-specific about
+    dist-manifest.json; the tool that reads and writes it knows nothing about
+    this project. The metadata half is the build inputs recorded verbatim, so
+    that retargeting a platform and leaving the manifest alone is caught. The
+    rules half is what has to hold whatever the artifacts happen to say, so
+    that regenerating the manifest from a broken build is caught too.
+    """
+    cpu, platforms = toolchain_targets()
+
+    rules = []
+    for artifact in ARTIFACTS:
+        rules += artifact_rules(artifact, platforms)
+
+    return {
+        "metadata": {
+            "cpu": cpu,
+            "targets": dict(sorted(platforms.items())),
+            "universal": {name: sorted(members)
+                          for name, members in sorted(UNIVERSAL.items())},
+        },
+        # Every file in dist/ is built for one of our platforms, so one that
+        # no rule claims is a file nobody meant to ship.
+        "require-rule-coverage": True,
+        "rules": rules,
+    }
 
 
 def check_dist(directory):
-    """Verifies `directory` against dist-manifest.json. Returns True when clean.
+    """Verifies `directory` against dist-manifest.json. True when it is clean.
 
-    Three things are checked. The manifest's record of the build inputs has to
-    match cmake/targets.json, so that retargeting cannot go unnoticed. Every
-    file has to be present and to read back exactly the profile recorded for
-    it. And every profile has to satisfy the invariants that follow from the
-    zig triple it was built with, which is what still catches a bad build after
-    someone has regenerated the manifest from it.
+    Passing the generated policy in as well means the manifest's copy of it
+    is compared against the one cmake/targets.json implies right now, so a
+    manifest written before the targets changed fails rather than enforcing
+    yesterday's rules.
     """
     if not MANIFEST.is_file():
         sys.exit(f"dev.py: no manifest at {MANIFEST}")
 
     manifest = json.loads(MANIFEST.read_text())
-    cpu, platforms = toolchain_targets()
-    problems = []
-
-    if manifest["cpu"] != cpu:
-        problems.append(
-            f"manifest builds for cpu {manifest['cpu']}, but {TARGETS.name} says {cpu}")
-    for platform_name in sorted(set(manifest["targets"]) | set(platforms)):
-        recorded = manifest["targets"].get(platform_name)
-        actual = platforms.get(platform_name)
-        if recorded != actual:
-            problems.append(f"build inputs for {platform_name}: manifest has {recorded}, "
-                            f"{TARGETS.name} has {actual}")
-
-    for group in sorted(set(manifest.get("universal", {})) | set(UNIVERSAL)):
-        recorded = manifest.get("universal", {}).get(group)
-        actual = sorted(UNIVERSAL[group]) if group in UNIVERSAL else None
-        if recorded != actual:
-            problems.append(f"universal artifact {group}: manifest has {recorded}, "
-                            f"{TARGETS.name} has {actual}")
-
-    for name, recorded in sorted(manifest["files"].items()):
-        path = directory / name
-        if not path.is_file():
-            problems.append(f"{name}: missing")
-            continue
-
-        try:
-            found = file_profile(path)
-        except (binfmt.UnknownFormat, OSError, ValueError) as error:
-            problems.append(f"{name}: {error}")
-            continue
-
-        problems += compare_profile(name, recorded, found)
-        problems += check_invariants(name, found, artifact_targets(name, platforms))
-
-    for path in sorted(directory.iterdir()):
-        if path.is_file() and path.name not in manifest["files"]:
-            problems.append(f"{path.name}: present but not listed in the manifest")
+    problems = dist_manifest.check(directory, manifest, policy=manifest_policy())
 
     if problems:
         print(f"\ndist-check FAILED for {directory}", file=sys.stderr)
@@ -468,7 +407,7 @@ def collect_universal(name, members, config):
                      f"{len(sources)} of the {len(members)} {name} platforms")
 
         destination = DIST_DIR / dist_name(Path(file_name), name)
-        binfmt.write_universal(sources, destination)
+        dist_manifest.write_universal(sources, destination)
         # write_universal only writes bytes; an executable has to stay one.
         shutil.copymode(sources[0], destination)
         print(f"  {destination.relative_to(ROOT)}", flush=True)
@@ -500,7 +439,8 @@ def command_dist(args):
         collect_universal(name, members, config)
 
     if args.write_manifest:
-        MANIFEST.write_text(json.dumps(build_manifest(DIST_DIR), indent=4) + "\n")
+        MANIFEST.write_text(json.dumps(
+            dist_manifest.record(DIST_DIR, manifest_policy()), indent=4) + "\n")
         print(f"\nwrote {MANIFEST.relative_to(ROOT)}", flush=True)
 
     if not check_dist(DIST_DIR):

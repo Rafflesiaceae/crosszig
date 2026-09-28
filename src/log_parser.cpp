@@ -24,13 +24,16 @@ const boost::regex& key_value_pattern() {
 
 }  // namespace
 
-std::optional<LogEntry> parse_log_line(const std::string& line) {
+bool parse_log_line(const std::string& line, LogEntry& out) {
     boost::smatch match;
     if (!boost::regex_match(line, match, log_line_pattern())) {
-        return std::nullopt;
+        return false;
     }
 
-    return LogEntry{match[1].str(), match[2].str(), match[3].str()};
+    out.timestamp = match[1].str();
+    out.level = match[2].str();
+    out.message = match[3].str();
+    return true;
 }
 
 std::vector<std::string> extract_key_values(const std::string& text) {

@@ -20,6 +20,9 @@ set_target_properties(crosszig_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
+# Anything consuming the library needs at least C++11 as well.
+target_compile_features(crosszig_core PUBLIC cxx_std_11)
+
 add_executable(crosszig_cli
     main.cpp
 )
@@ -27,6 +30,15 @@ add_executable(crosszig_cli
 target_link_libraries(crosszig_cli PRIVATE crosszig::core)
 
 set_target_properties(crosszig_cli PROPERTIES OUTPUT_NAME crosszig)
+
+# Pin the sample to exactly C++11 rather than letting the compiler default
+# decide; CXX_STANDARD_REQUIRED turns a missing -std=c++11 into an error
+# instead of a silent fallback to a newer standard.
+set_target_properties(crosszig_core crosszig_cli PROPERTIES
+    CXX_STANDARD 11
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
 
 install(TARGETS crosszig_core crosszig_cli
     RUNTIME DESTINATION bin

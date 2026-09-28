@@ -18,16 +18,15 @@ const std::vector<std::string>& sample_lines() {
 }
 
 void report(const std::string& line) {
-    const auto entry = crosszig::parse_log_line(line);
-    if (!entry) {
+    crosszig::LogEntry entry;
+    if (!crosszig::parse_log_line(line, entry)) {
         std::cout << "  skipped (no match): " << line << "\n";
         return;
     }
 
-    std::cout << "  " << entry->timestamp << " | " << entry->level << " | " << entry->message
-              << "\n";
+    std::cout << "  " << entry.timestamp << " | " << entry.level << " | " << entry.message << "\n";
 
-    for (const auto& pair : crosszig::extract_key_values(entry->message)) {
+    for (const auto& pair : crosszig::extract_key_values(entry.message)) {
         std::cout << "      " << pair << "\n";
     }
 }

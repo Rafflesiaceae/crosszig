@@ -1,6 +1,5 @@
 #pragma once
 
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,9 +12,10 @@ struct LogEntry {
     std::string message;
 };
 
-/// Parses a line of the shape `2026-09-28T16:33:00 [LEVEL] some message`.
-/// Returns `std::nullopt` when the line does not match that shape.
-std::optional<LogEntry> parse_log_line(const std::string& line);
+/// Parses a line of the shape `2026-09-28T16:33:00 [LEVEL] some message` into
+/// `out`. Returns false and leaves `out` untouched when the line does not match
+/// that shape.
+bool parse_log_line(const std::string& line, LogEntry& out);
 
 /// Returns every `key=value` pair found in `text`, formatted as `key -> value`.
 std::vector<std::string> extract_key_values(const std::string& text);

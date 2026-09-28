@@ -214,15 +214,15 @@ are assembled out of several of them, and a profile of every file collected.
 Which profile keys appear depends on the format, because the formats record
 genuinely different things:
 
-| Format            | Keys                                                          |
-| ----------------- | ------------------------------------------------------------- |
-| all               | `format`, `arch`                                                |
-| `elf`             | `needs`, `symbol-versions`, `runpath`, `min-kernel`             |
-| `pe`              | `needs`, `min-os`, `subsystem-version`                          |
-| `macho`           | `needs`, `dylib-compat`, `rpath`, `macos-min`, `code-signature` |
-| `archive`         | nothing further                                                 |
-| `macho-universal` | `slices`, one full `macho` profile per architecture             |
-| `archive-universal` | `slices`, one `archive` profile per architecture              |
+| Format              | Keys                                                            |
+| ------------------- | --------------------------------------------------------------- |
+| all                 | `format`, `arch`                                                  |
+| `elf`               | `needs`, `symbol-versions`, `runpath`, `min-kernel`, `interpreter`|
+| `pe`                | `needs`, `imports`, `min-os`, `subsystem-version`                 |
+| `macho`             | `needs`, `dylib-compat`, `rpath`, `macos-min`, `code-signature`   |
+| `archive`           | `cxx-runtime`                                                     |
+| `macho-universal`   | `slices`, one full `macho` profile per architecture               |
+| `archive-universal` | `slices`, one `archive` profile per architecture                  |
 
 `arch` is a string everywhere except on a universal file, where it is the
 sorted list of architectures it carries and has to match the set of platforms
@@ -236,6 +236,24 @@ for Mach-O (`/usr/lib/libSystem.B.dylib`). `symbol-versions` is keyed on the
 version namespace rather than on the library, because that is the part that
 decides compatibility: `GLIBC_2.3.3` means glibc 2.3.3 or newer regardless of
 which of libc, libm or libpthread pulled it in.
+
+Three of those keys are there because the obvious reading of a file leaves a
+real compatibility question open:
+
+* **`interpreter`** is the dynamic loader from `.interp`, and `null` for a
+  static binary. Without it a static image and a dynamic one that happens to
+  need nothing are indistinguishable, and the path differs per architecture.
+* **`imports`** lists the function names behind each PE dependency, not just
+  the DLL. Nothing in a PE records the Windows version it actually requires:
+  `min-os` and `subsystem-version` are whatever the linker was told to write,
+  so the API names are the only evidence there is. Listing them means a CRT
+  update that starts calling a newer API shows up as a manifest difference
+  instead of passing silently.
+* **`cxx-runtime`** is which C++ standard library an archive expects, worked
+  out from the mangling of its undefined symbols. libc++, libstdc++ and the
+  MSVC STL are not link compatible, and an archive otherwise says nothing
+  about which one it was built against, so a consumer that assumes wrong only
+  finds out at link time.
 
 `dist-check` then asserts three separate things:
 

@@ -11,9 +11,9 @@ because the formats genuinely record different things:
 
     all                format, arch
     elf                needs, symbol-versions, runpath, min-kernel
-    pe                 needs, min-os, subsystem-version
+    pe                 needs, imports, min-os, subsystem-version
     macho              needs, dylib-compat, rpath, macos-min, code-signature
-    archive            nothing beyond format and arch
+    archive            cxx-runtime
     macho-universal    slices, one full macho profile per architecture
     archive-universal  slices, one archive profile per architecture
 
@@ -152,6 +152,10 @@ def _elf(data):
         "needs": sorted(needs),
         "symbol-versions": _elf_symbol_versions(data, order, sections),
         "runpath": sorted(runpath),
+        # null for a statically linked image. Without this a static binary and
+        # a dynamic one that happens to need nothing look identical, and the
+        # path itself is architecture specific, so it is worth pinning down.
+        "interpreter": _elf_interpreter(data, sections),
     }
 
     kernel = _elf_min_kernel(data, order, sections)
@@ -205,6 +209,14 @@ def _elf_symbol_versions(data, order, sections):
     return dict(sorted(highest.items()))
 
 
+def _elf_interpreter(data, sections):
+    """The dynamic loader named in .interp, or None for a static binary."""
+    for name, kind, offset, _size, _link in sections:
+        if kind == 1 and name == ".interp":  # SHT_PROGBITS
+            return _cstring(data, offset)
+    return None
+
+
 def _elf_min_kernel(data, order, sections):
     """Oldest Linux kernel the binary declares it runs on, from .note.ABI-tag."""
     for name, kind, offset, _size, _link in sections:
@@ -249,11 +261,20 @@ def _pe(data):
         struct.unpack_from("<HHHHHH", data, optional + 40)
     directories = optional + (112 if magic == 0x20B else 96)
 
+    imports = _pe_imports(data, optional + optional_size, section_count,
+                          struct.unpack_from("<I", data, directories + 8)[0],
+                          magic == 0x20B)
+
     return {
         "format": "pe",
         "arch": _PE_MACHINES.get(machine, _unknown(machine)),
-        "needs": sorted(_pe_imports(data, optional + optional_size, section_count,
-                                    struct.unpack_from("<I", data, directories + 8)[0])),
+        "needs": sorted(imports),
+        # Which Windows version a PE actually requires is not recorded anywhere
+        # in the file; min-os and the subsystem version below are whatever the
+        # linker was told to write. The function names are the evidence, since
+        # an API that did not exist yet is what really stops the image from
+        # loading, so they are listed rather than summarised away.
+        "imports": {name: sorted(imports[name]) for name in sorted(imports)},
         # The loader refuses to start an image whose subsystem version is above
         # the running Windows; min-os is advisory but recorded alongside it.
         "min-os": f"{os_major}.{os_minor}",
@@ -261,9 +282,10 @@ def _pe(data):
     }
 
 
-def _pe_imports(data, section_table, section_count, import_rva):
+def _pe_imports(data, section_table, section_count, import_rva, is_64):
+    """The import table as `{"KERNEL32.dll": ["CloseHandle", ...]}`."""
     if import_rva == 0:
-        return []
+        return {}
 
     sections = []
     for index in range(section_count):
@@ -278,17 +300,40 @@ def _pe_imports(data, section_table, section_count, import_rva):
                 return raw_offset + (rva - virtual_address)
         raise UnknownFormat(f"RVA {rva:#x} is outside every section")
 
-    names = []
+    # Thunks are pointer sized, and the top bit means "imported by ordinal"
+    # rather than "RVA of a hint/name entry".
+    thunk_format = "<Q" if is_64 else "<I"
+    thunk_width = struct.calcsize(thunk_format)
+    ordinal_flag = 1 << (thunk_width * 8 - 1)
+
+    found = {}
     descriptor = to_offset(import_rva)
     while True:
         # A 20 byte all-zero descriptor terminates the import directory.
-        entry = struct.unpack_from("<IIIII", data, descriptor)
-        if not any(entry):
+        lookup_rva, _timestamp, _forwarder, name_rva, address_rva = struct.unpack_from(
+            "<IIIII", data, descriptor)
+        if not any((lookup_rva, _timestamp, _forwarder, name_rva, address_rva)):
             break
-        names.append(_cstring(data, to_offset(entry[3])))
+
+        # The lookup table is the one that survives binding; fall back to the
+        # address table for images that have none.
+        functions = []
+        thunk = to_offset(lookup_rva or address_rva)
+        while True:
+            value = struct.unpack_from(thunk_format, data, thunk)[0]
+            if value == 0:
+                break
+            if value & ordinal_flag:
+                functions.append(f"#{value & 0xFFFF}")
+            else:
+                # A hint/name entry is a two byte hint followed by the name.
+                functions.append(_cstring(data, to_offset(value) + 2))
+            thunk += thunk_width
+
+        found[_cstring(data, to_offset(name_rva))] = functions
         descriptor += 20
 
-    return names
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -508,15 +553,134 @@ def _archive_members(data):
 
 
 def _archive(data):
-    """An archive has no link information of its own, but its members have an
-    architecture, and that is worth pinning down: it is the only thing telling
-    a static library for one platform apart from one for another."""
+    """A static library records no dependencies of its own, so what can be
+    recovered is what its members are: the architecture they were built for,
+    and which C++ standard library they expect to be linked against."""
+    arch = None
+    undefined = []
     for member in _archive_members(data):
-        arch = _member_arch(member)
-        if arch is not None:
-            return {"format": "archive", "arch": arch}
+        if arch is None:
+            arch = _member_arch(member)
+        undefined += _member_undefined(member)
 
-    return {"format": "archive", "arch": "unknown"}
+    return {
+        "format": "archive",
+        "arch": arch or "unknown",
+        "cxx-runtime": _cxx_runtime(undefined),
+    }
+
+
+def _cxx_runtime(undefined):
+    """Which C++ standard library the undefined symbols come from, if any.
+
+    The three are not link compatible, and an archive says nothing about which
+    one it was built against, so a consumer that assumes the wrong one only
+    finds out at link time. libc++ wraps everything in the inline namespace
+    `std::__1`, which mangles as `St3__1`; libstdc++ has no such namespace;
+    MSVC does not use Itanium mangling at all.
+    """
+    evidence = set()
+    for name in undefined:
+        if "St3__1" in name:
+            evidence.add("libc++")
+        elif name.startswith("?") and "@std@@" in name:
+            evidence.add("msvc-stl")
+        elif name.startswith("_Z") and "St" in name:
+            evidence.add("libstdc++")
+
+    # A handful of `std::` symbols mangle identically under libc++ and
+    # libstdc++, so the specific finding has to win over the generic one.
+    for candidate in ("libc++", "msvc-stl", "libstdc++"):
+        if candidate in evidence:
+            return candidate
+    return None
+
+
+def _member_undefined(member):
+    """Externally undefined symbol names of one archive member."""
+    if member[:4] == b"\x7fELF":
+        return _elf_undefined(member)
+    if member[:4] in _MACHO_MAGIC:
+        return _macho_undefined(member)
+    if len(member) >= 20 and struct.unpack_from("<H", member, 0)[0] in _PE_MACHINES \
+            and struct.unpack_from("<H", member, 16)[0] == 0:
+        return _coff_undefined(member)
+    return []
+
+
+def _elf_undefined(data):
+    """SHT_SYMTAB entries whose section index is SHN_UNDEF."""
+    order, is_64, sections = _elf_sections(data)
+    # Elf64_Sym is name, info, other, shndx, value, size; Elf32_Sym orders the
+    # same fields differently, hence the two index positions below.
+    entry = order + ("IBBHQQ" if is_64 else "IIIBBH")
+    width = struct.calcsize(entry)
+    shndx_at = 3 if is_64 else 5
+
+    names = []
+    for _name, kind, offset, size, link in sections:
+        if kind != 2:  # SHT_SYMTAB
+            continue
+        strings = sections[link][2]
+        for position in range(offset, offset + size, width):
+            fields = struct.unpack_from(entry, data, position)
+            if fields[shndx_at] == 0 and fields[0]:
+                names.append(_cstring(data, strings + fields[0]))
+    return names
+
+
+_LC_SYMTAB = 0x02
+
+
+def _macho_undefined(data):
+    """LC_SYMTAB entries that are external and of type N_UNDF."""
+    magic = data[:4]
+    order = _macho_order(magic)
+    is_64 = magic in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf")
+    command_count = struct.unpack_from(order + "I", data, 16)[0]
+    position = 32 if is_64 else 28
+
+    entry = order + ("IBBHQ" if is_64 else "IBBhI")
+    width = struct.calcsize(entry)
+
+    names = []
+    for _ in range(command_count):
+        command, size = struct.unpack_from(order + "II", data, position)
+        if command == _LC_SYMTAB:
+            symbols, count, strings, _length = struct.unpack_from(
+                order + "IIII", data, position + 8)
+            for index in range(count):
+                name, kind = struct.unpack_from(entry, data, symbols + index * width)[:2]
+                # N_TYPE is bits 1 to 3; 0 there is N_UNDF, and bit 0 is N_EXT.
+                if kind & 0x0E == 0 and kind & 0x01 and name:
+                    names.append(_cstring(data, strings + name))
+        position += size
+    return names
+
+
+def _coff_undefined(data):
+    """COFF symbols with section number 0 and external storage class."""
+    table, count = struct.unpack_from("<II", data, 8)
+    if table == 0:
+        return []
+    strings = table + 18 * count
+
+    names = []
+    index = 0
+    while index < count:
+        record = table + index * 18
+        section, _kind, storage, auxiliary = struct.unpack_from("<hHBB", data, record + 12)
+        if section == 0 and storage == 2:  # IMAGE_SYM_CLASS_EXTERNAL
+            # A name of eight characters or less sits in the record; a longer
+            # one is a zero word followed by an offset into the string table.
+            if struct.unpack_from("<I", data, record)[0] == 0:
+                names.append(_cstring(data, strings + struct.unpack_from(
+                    "<I", data, record + 4)[0]))
+            else:
+                names.append(data[record:record + 8].rstrip(b"\0").decode(
+                    "utf-8", "replace"))
+        index += 1 + auxiliary  # auxiliary records follow their symbol
+    return names
 
 
 def _member_arch(member):

@@ -4,14 +4,17 @@
 Wraps the CMake/zig cross-compilation setup so that any supported host can
 produce binaries for any supported target:
 
-    ./dev.py build            # debug, for the host platform
-    ./dev.py build -r -a      # release, for every supported platform
-    ./dev.py build -t win-64  # debug, for Windows only
-    ./dev.py run -r           # build for the host and run the binary
+    ./dev.py build                 # debug, for the host platform
+    ./dev.py build -r -a           # release, for every supported platform
+    ./dev.py build -t win-64       # debug, for Windows only
+    ./dev.py run -r                # build for the host and run the binary
+    ./dev.py dist                  # collect the release build of every platform
+    ./dev.py dist-check ./dist     # check a directory against dist-manifest.json
     ./dev.py clean
 """
 
 import argparse
+import json
 import os
 import platform
 import shutil
@@ -19,9 +22,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tools import binfmt
+
 ROOT = Path(__file__).resolve().parent
 BUILD_ROOT = ROOT / "build"
-DIST_ROOT = ROOT / "dist"
+DIST_DIR = ROOT / "dist"
+MANIFEST = ROOT / "dist-manifest.json"
 TOOLCHAIN = ROOT / "cmake" / "ZigToolchain.cmake"
 
 # Must stay in sync with `platforms` in pixi.toml and with ZigToolchain.cmake.
@@ -32,6 +38,9 @@ PLATFORMS = ["linux-64", "win-64", "osx-64", "osx-arm64"]
 PIXI_GUARD = "CROSSZIG_INSIDE_PIXI"
 
 REQUIRED_TOOLS = ["cmake", "ninja", "zig"]
+
+# The commands that shell out to the toolchain; the rest only touch files.
+TOOLCHAIN_COMMANDS = {"build", "run"}
 
 
 def host_platform():
@@ -80,33 +89,103 @@ def run(command, **kwargs):
     subprocess.run([str(part) for part in command], check=True, **kwargs)
 
 
+def config_name(release):
+    return "Release" if release else "Debug"
+
+
+def build_dir(target, config):
+    return BUILD_ROOT / f"{target}-{config.lower()}"
+
+
+def install_dir(target, config):
+    """Where a single platform build is installed, before it is collected."""
+    return build_dir(target, config) / "install"
+
+
 def build_one(target, config, jobs=None, clean=False):
     """Configure, build and install a single target platform."""
-    build_dir = BUILD_ROOT / f"{target}-{config.lower()}"
-    install_dir = DIST_ROOT / f"{target}-{config.lower()}"
+    output = build_dir(target, config)
 
     if clean:
-        shutil.rmtree(build_dir, ignore_errors=True)
-        shutil.rmtree(install_dir, ignore_errors=True)
+        shutil.rmtree(output, ignore_errors=True)
 
     # CMake is cheap to re-run and skips the work when nothing changed, so this
     # is called unconditionally instead of checking for an existing cache.
     run([
         "cmake",
         "-S", ROOT,
-        "-B", build_dir,
+        "-B", output,
         "-G", "Ninja",
         f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN}",
         f"-DCROSSZIG_TARGET={target}",
         f"-DCMAKE_BUILD_TYPE={config}",
     ])
 
-    build_command = ["cmake", "--build", build_dir]
+    build_command = ["cmake", "--build", output]
     if jobs:
         build_command += ["--parallel", str(jobs)]
     run(build_command)
 
-    run(["cmake", "--install", build_dir, "--prefix", install_dir])
+    run(["cmake", "--install", output, "--prefix", install_dir(target, config)])
+
+
+def dist_name(path, target):
+    """`libcrosszig.a` for osx-arm64 becomes `libcrosszig-osx-arm64.a`."""
+    return f"{path.stem}-{target}{path.suffix}"
+
+
+def collect_dependencies(directory):
+    """Maps every file in `directory` to the dynamic libraries it needs."""
+    return {
+        path.name: binfmt.dynamic_dependencies(path)
+        for path in sorted(directory.iterdir())
+        if path.is_file()
+    }
+
+
+def check_dist(directory):
+    """Verifies `directory` against dist-manifest.json. Returns True when clean.
+
+    The manifest defines the complete expected content: every file it lists has
+    to be there, has to need every library it lists, and must not need any
+    other. Files in the directory that the manifest does not mention are
+    reported too, so that a stale artifact cannot slip through unnoticed.
+    """
+    if not MANIFEST.is_file():
+        sys.exit(f"dev.py: no manifest at {MANIFEST}")
+
+    manifest = json.loads(MANIFEST.read_text())
+    problems = []
+
+    for name, expected in sorted(manifest.items()):
+        path = directory / name
+        if not path.is_file():
+            problems.append(f"{name}: missing")
+            continue
+
+        try:
+            actual = binfmt.dynamic_dependencies(path)
+        except (binfmt.UnknownFormat, OSError) as error:
+            problems.append(f"{name}: {error}")
+            continue
+
+        for library in sorted(set(expected) - set(actual)):
+            problems.append(f"{name}: expected dependency is not linked: {library}")
+        for library in sorted(set(actual) - set(expected)):
+            problems.append(f"{name}: unexpected dependency: {library}")
+
+    for path in sorted(directory.iterdir()):
+        if path.is_file() and path.name not in manifest:
+            problems.append(f"{path.name}: present but not listed in the manifest")
+
+    if problems:
+        print(f"\ndist-check FAILED for {directory}", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        return False
+
+    print(f"\ndist-check ok: {len(manifest)} files in {directory}")
+    return True
 
 
 def command_build(args):
@@ -117,27 +196,68 @@ def command_build(args):
     else:
         targets = [host_platform()]
 
-    config = "Release" if args.release else "Debug"
+    config = config_name(args.release)
 
     for target in targets:
         print(f"\n== {target} ({config}) ==", flush=True)
         build_one(target, config, jobs=args.jobs, clean=args.clean)
 
-    print(f"\nartifacts in {DIST_ROOT}", flush=True)
-
 
 def command_run(args):
     target = host_platform()
-    config = "Release" if args.release else "Debug"
+    config = config_name(args.release)
     build_one(target, config, jobs=args.jobs)
 
     suffix = ".exe" if target == "win-64" else ""
-    binary = DIST_ROOT / f"{target}-{config.lower()}" / "bin" / f"crosszig{suffix}"
-    run([binary, *args.args])
+    run([install_dir(target, config) / "bin" / f"crosszig{suffix}", *args.args])
+
+
+def command_dist(args):
+    # Always the release build: a debug binary pulls in extra imports (the
+    # Windows one picks up ntdll.dll, for instance), so a manifest could not
+    # describe both configurations at once.
+    config = "Release"
+
+    missing = [target for target in PLATFORMS if not install_dir(target, config).is_dir()]
+    if missing:
+        sys.exit("dev.py: nothing built for {}; run `./dev.py build -r -a` first".format(
+            ", ".join(missing)))
+
+    # Rebuilt from scratch every time, so that artifacts of a platform that was
+    # dropped in the meantime cannot linger.
+    shutil.rmtree(DIST_DIR, ignore_errors=True)
+    DIST_DIR.mkdir(parents=True)
+
+    for target in PLATFORMS:
+        for subdirectory in ("bin", "lib"):
+            source_dir = install_dir(target, config) / subdirectory
+            if not source_dir.is_dir():
+                continue
+            for source in sorted(source_dir.iterdir()):
+                if not source.is_file():
+                    continue
+                destination = DIST_DIR / dist_name(source, target)
+                shutil.copy2(source, destination)
+                print(f"  {destination.relative_to(ROOT)}", flush=True)
+
+    if args.write_manifest:
+        MANIFEST.write_text(json.dumps(collect_dependencies(DIST_DIR), indent=4) + "\n")
+        print(f"\nwrote {MANIFEST.relative_to(ROOT)}", flush=True)
+
+    if not check_dist(DIST_DIR):
+        sys.exit(1)
+
+
+def command_dist_check(args):
+    directory = Path(args.directory).resolve()
+    if not directory.is_dir():
+        sys.exit(f"dev.py: {directory} is not a directory")
+    if not check_dist(directory):
+        sys.exit(1)
 
 
 def command_clean(_args):
-    for directory in (BUILD_ROOT, DIST_ROOT):
+    for directory in (BUILD_ROOT, DIST_DIR):
         print(f"removing {directory}", flush=True)
         shutil.rmtree(directory, ignore_errors=True)
 
@@ -147,14 +267,13 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    def add_common(subparser):
+    def add_release_flag(subparser):
         subparser.add_argument("-r", "--release", action="store_true",
-                               help="build with optimisations (default: debug)")
-        subparser.add_argument("-j", "--jobs", type=int,
-                               help="number of parallel compile jobs")
+                               help="use the release configuration (default: debug)")
 
     build = subparsers.add_parser("build", help="cross compile the project")
-    add_common(build)
+    add_release_flag(build)
+    build.add_argument("-j", "--jobs", type=int, help="number of parallel compile jobs")
     build.add_argument("-a", "--all", action="store_true",
                        help="build for every supported platform")
     build.add_argument("-t", "--target", action="append", choices=PLATFORMS,
@@ -164,17 +283,31 @@ def main():
     build.set_defaults(func=command_build)
 
     run_parser = subparsers.add_parser("run", help="build for the host and run the binary")
-    add_common(run_parser)
+    add_release_flag(run_parser)
+    run_parser.add_argument("-j", "--jobs", type=int, help="number of parallel compile jobs")
     run_parser.add_argument("args", nargs=argparse.REMAINDER,
                             help="arguments passed on to the binary")
     run_parser.set_defaults(func=command_run)
 
-    clean = subparsers.add_parser("clean", help="remove build and dist directories")
+    dist = subparsers.add_parser(
+        "dist", help="collect the release artifacts of every platform into ./dist "
+                     "and check them")
+    dist.add_argument("--write-manifest", action="store_true",
+                      help="regenerate dist-manifest.json from what was collected, "
+                           "instead of keeping the current one")
+    dist.set_defaults(func=command_dist)
+
+    dist_check = subparsers.add_parser(
+        "dist-check", help="check a directory against dist-manifest.json")
+    dist_check.add_argument("directory", help="directory holding the distribution")
+    dist_check.set_defaults(func=command_dist_check)
+
+    clean = subparsers.add_parser("clean", help="remove the build and dist directories")
     clean.set_defaults(func=command_clean)
 
     args = parser.parse_args()
 
-    if args.command != "clean":
+    if args.command in TOOLCHAIN_COMMANDS:
         reexec_in_pixi()
 
     try:

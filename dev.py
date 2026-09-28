@@ -33,8 +33,14 @@ TOOLCHAIN = ROOT / "cmake" / "ZigToolchain.cmake"
 TARGETS = ROOT / "cmake" / "targets.json"
 
 # The one place the platforms are spelled out is cmake/targets.json, which the
-# toolchain file reads as well. Must match `platforms` in pixi.toml.
+# toolchain file reads as well.
 PLATFORMS = sorted(json.loads(TARGETS.read_text())["platforms"])
+
+# Platforms whose builds are not shipped on their own but folded into a
+# universal artifact, and the names those artifacts carry.
+UNIVERSAL = json.loads(TARGETS.read_text()).get("universal", {})
+GROUPED = {member for members in UNIVERSAL.values() for member in members}
+ARTIFACTS = sorted((set(PLATFORMS) - GROUPED) | set(UNIVERSAL))
 
 # What the leading component of a zig triple says the architecture will be,
 # named the way tools/binfmt.py reports it.
@@ -199,12 +205,30 @@ def toolchain_targets():
 
 
 def platform_of(name):
-    """Which platform a collected file belongs to, from its name suffix."""
+    """Which artifact a collected file belongs to, from its name suffix.
+
+    That is a platform for a file shipped on its own and a group name such as
+    `osx-universal` for one assembled out of several platform builds.
+    """
     stem = Path(name).stem
-    for candidate in PLATFORMS:
+    for candidate in ARTIFACTS:
         if stem.endswith(f"-{candidate}"):
             return candidate
     return None
+
+
+def artifact_targets(name, platforms):
+    """The platform entries a collected file has to satisfy.
+
+    One for a file built for a single platform, one per slice for a universal
+    one, and none at all when the name matches nothing we build.
+    """
+    artifact = platform_of(name)
+    if artifact in UNIVERSAL:
+        return [platforms[member] for member in UNIVERSAL[artifact]
+                if member in platforms]
+    entry = platforms.get(artifact)
+    return [entry] if entry else []
 
 
 def dist_name(path, target):
@@ -223,6 +247,7 @@ def build_manifest(directory):
     return {
         "cpu": cpu,
         "targets": dict(sorted(platforms.items())),
+        "universal": {name: sorted(members) for name, members in sorted(UNIVERSAL.items())},
         "files": {
             path.name: file_profile(path)
             for path in sorted(directory.iterdir())
@@ -251,45 +276,9 @@ def check_search_paths(label, found):
             for key in ("runpath", "rpath") if found.get(key)]
 
 
-def check_macho(label, found, triple):
-    """The Mach-O rules, applied to a thin file or to one slice of a fat one."""
+def check_image(label, found, triple):
+    """The rules for one thin image, checked against the triple that built it."""
     problems = check_search_paths(label, found)
-
-    floor = re.search(r"-macos\.([0-9][0-9.]*)-", triple)
-    declared = found.get("macos-min")
-    if floor and (declared is None or
-                  binfmt.version_tuple(declared) != binfmt.version_tuple(floor.group(1))):
-        problems.append(f"{label}: declares macOS {declared}, "
-                        f"but {triple} targets {floor.group(1)}")
-
-    # arm64 macOS will not execute an unsigned binary at all.
-    if found.get("arch", "").startswith("arm64") and not found.get("code-signature"):
-        problems.append(f"{label}: arm64 macOS binary carries no code signature")
-
-    return problems
-
-
-def check_invariants(name, found, triple):
-    """Checks the profile against the build inputs rather than against the
-    manifest, so that a manifest regenerated from a broken build still fails.
-    """
-    if triple is None:
-        return [f"{name}: no known platform in the file name"]
-
-    problems = []
-
-    # A universal binary reports a list of architectures and satisfies the
-    # triple as long as it carries the right one among them.
-    architectures = found.get("arch")
-    if not isinstance(architectures, list):
-        architectures = [architectures]
-
-    expected_arch = ARCH_BY_TRIPLE.get(triple.split("-")[0])
-    if expected_arch and expected_arch not in architectures:
-        problems.append(
-            f"{name}: built for {found.get('arch')}, but {triple} targets {expected_arch}")
-
-    problems += check_search_paths(name, found)
 
     if found.get("format") == "elf":
         ceiling = re.search(r"-gnu\.([0-9][0-9.]*)$", triple)
@@ -297,12 +286,61 @@ def check_invariants(name, found, triple):
         if ceiling and needed and \
                 binfmt.version_tuple(needed) > binfmt.version_tuple(ceiling.group(1)):
             problems.append(
-                f"{name}: needs glibc {needed}, above the targeted {ceiling.group(1)}")
+                f"{label}: needs glibc {needed}, above the targeted {ceiling.group(1)}")
 
     if found.get("format") == "macho":
-        problems += check_macho(name, found, triple)
-    for slice_arch, slice_profile in sorted(found.get("slices", {}).items()):
-        problems += check_macho(f"{name} [{slice_arch}]", slice_profile, triple)
+        floor = re.search(r"-macos\.([0-9][0-9.]*)-", triple)
+        declared = found.get("macos-min")
+        if floor and (declared is None or
+                      binfmt.version_tuple(declared) != binfmt.version_tuple(floor.group(1))):
+            problems.append(f"{label}: declares macOS {declared}, "
+                            f"but {triple} targets {floor.group(1)}")
+
+        # arm64 macOS will not execute an unsigned binary at all.
+        if found.get("arch", "").startswith("arm64") and not found.get("code-signature"):
+            problems.append(f"{label}: arm64 macOS binary carries no code signature")
+
+    return problems
+
+
+def arch_of_triple(triple):
+    """What binfmt.py will call the architecture the triple names."""
+    leading = triple.split("-")[0]
+    return ARCH_BY_TRIPLE.get(leading, leading)
+
+
+def check_invariants(name, found, targets):
+    """Checks the profile against the build inputs rather than against the
+    manifest, so that a manifest regenerated from a broken build still fails.
+
+    `targets` is the list of platform entries the file has to satisfy: one for
+    a plain artifact, one per slice for a universal one.
+    """
+    if not targets:
+        return [f"{name}: no known platform in the file name"]
+
+    problems = []
+    by_arch = {arch_of_triple(entry["triple"]): entry["triple"] for entry in targets}
+
+    # A universal file reports the list of architectures it carries; a thin one
+    # reports the single string. Either way it has to be exactly the set the
+    # targets ask for, so that a missing or a stray slice both show up.
+    architectures = found.get("arch")
+    if not isinstance(architectures, list):
+        architectures = [architectures]
+    if sorted(architectures) != sorted(by_arch):
+        problems.append(f"{name}: carries {sorted(architectures)}, "
+                        f"but its targets ask for {sorted(by_arch)}")
+
+    # A thin file is treated as its own single slice, so both go through the
+    # same per-image rules below.
+    slices = found.get("slices") or {architectures[0]: found}
+    for arch, image in sorted(slices.items()):
+        triple = by_arch.get(arch)
+        if triple is None:
+            continue  # already reported as an unexpected architecture above
+        label = name if len(slices) == 1 else f"{name} [{arch}]"
+        problems += check_image(label, image, triple)
 
     return problems
 
@@ -334,6 +372,13 @@ def check_dist(directory):
             problems.append(f"build inputs for {platform_name}: manifest has {recorded}, "
                             f"{TARGETS.name} has {actual}")
 
+    for group in sorted(set(manifest.get("universal", {})) | set(UNIVERSAL)):
+        recorded = manifest.get("universal", {}).get(group)
+        actual = sorted(UNIVERSAL[group]) if group in UNIVERSAL else None
+        if recorded != actual:
+            problems.append(f"universal artifact {group}: manifest has {recorded}, "
+                            f"{TARGETS.name} has {actual}")
+
     for name, recorded in sorted(manifest["files"].items()):
         path = directory / name
         if not path.is_file():
@@ -346,9 +391,8 @@ def check_dist(directory):
             problems.append(f"{name}: {error}")
             continue
 
-        target = platforms.get(found.get("platform")) or {}
         problems += compare_profile(name, recorded, found)
-        problems += check_invariants(name, found, target.get("triple"))
+        problems += check_invariants(name, found, artifact_targets(name, platforms))
 
     for path in sorted(directory.iterdir()):
         if path.is_file() and path.name not in manifest["files"]:
@@ -389,6 +433,39 @@ def command_run(args):
     run([install_dir(target, config) / "bin" / f"crosszig{suffix}", *args.args])
 
 
+def installed_files(target, config):
+    """The artifacts one platform build installed, in a stable order."""
+    found = []
+    for subdirectory in ("bin", "lib"):
+        source_dir = install_dir(target, config) / subdirectory
+        if source_dir.is_dir():
+            found += [path for path in sorted(source_dir.iterdir()) if path.is_file()]
+    return found
+
+
+def collect_universal(name, members, config):
+    """Folds the matching artifact of every member platform into one fat file.
+
+    Members are paired up by file name, which is what the install layout gives
+    us: every platform installs the same `crosszig` and `libcrosszig.a`.
+    """
+    by_name = {}
+    for member in members:
+        for source in installed_files(member, config):
+            by_name.setdefault(source.name, []).append(source)
+
+    for file_name, sources in sorted(by_name.items()):
+        if len(sources) != len(members):
+            sys.exit(f"dev.py: {file_name} was built for only "
+                     f"{len(sources)} of the {len(members)} {name} platforms")
+
+        destination = DIST_DIR / dist_name(Path(file_name), name)
+        binfmt.write_universal(sources, destination)
+        # write_universal only writes bytes; an executable has to stay one.
+        shutil.copymode(sources[0], destination)
+        print(f"  {destination.relative_to(ROOT)}", flush=True)
+
+
 def command_dist(args):
     # Always the release build: a debug binary pulls in extra imports (the
     # Windows one picks up ntdll.dll, for instance), so a manifest could not
@@ -405,17 +482,14 @@ def command_dist(args):
     shutil.rmtree(DIST_DIR, ignore_errors=True)
     DIST_DIR.mkdir(parents=True)
 
-    for target in PLATFORMS:
-        for subdirectory in ("bin", "lib"):
-            source_dir = install_dir(target, config) / subdirectory
-            if not source_dir.is_dir():
-                continue
-            for source in sorted(source_dir.iterdir()):
-                if not source.is_file():
-                    continue
-                destination = DIST_DIR / dist_name(source, target)
-                shutil.copy2(source, destination)
-                print(f"  {destination.relative_to(ROOT)}", flush=True)
+    for target in sorted(set(PLATFORMS) - GROUPED):
+        for source in installed_files(target, config):
+            destination = DIST_DIR / dist_name(source, target)
+            shutil.copy2(source, destination)
+            print(f"  {destination.relative_to(ROOT)}", flush=True)
+
+    for name, members in sorted(UNIVERSAL.items()):
+        collect_universal(name, members, config)
 
     if args.write_manifest:
         MANIFEST.write_text(json.dumps(build_manifest(DIST_DIR), indent=4) + "\n")

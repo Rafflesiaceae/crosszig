@@ -170,22 +170,34 @@ report "no work to do" against artifacts built for the old target.
 ```
 dist/crosszig-linux-64        dist/libcrosszig-linux-64.a
 dist/crosszig-win-64.exe      dist/libcrosszig-win-64.a
-dist/crosszig-osx-64          dist/libcrosszig-osx-64.a
-dist/crosszig-osx-arm64       dist/libcrosszig-osx-arm64.a
+dist/crosszig-osx-universal   dist/libcrosszig-osx-universal.a
 ```
+
+macOS ships as one universal file rather than as two thin ones. The `universal`
+section of `cmake/targets.json` says which platform builds get folded together:
+
+```json
+"universal": { "osx-universal": ["osx-64", "osx-arm64"] }
+```
+
+Those platforms are still built separately, they are just not copied out on
+their own. Assembling the container is `binfmt.write_universal()` rather than
+`lipo`, because `lipo` only exists on macOS and this has to work on every host.
+It handles static libraries as well, which Apple wraps in the very same format.
 
 It then verifies the result against `dist-manifest.json` and fails if anything
 is off. `./dev.py dist-check <dir>` runs the same verification on its own, so a
 distribution can also be checked after the fact, for instance once it has been
 unpacked somewhere else.
 
-The manifest records two things: the build inputs, and a profile of every
-file that was collected.
+The manifest records two things: the build inputs, including which artifacts
+are assembled out of several of them, and a profile of every file collected.
 
 ```json
 {
     "cpu": "baseline",
     "targets": { "linux-64": { "triple": "x86_64-linux-gnu.2.3.3", "...": "..." } },
+    "universal": { "osx-universal": ["osx-64", "osx-arm64"] },
     "files": {
         "crosszig-linux-64": {
             "platform": "linux-64",
@@ -209,13 +221,15 @@ genuinely different things:
 | `elf`             | `needs`, `symbol-versions`, `runpath`, `min-kernel`             |
 | `pe`              | `needs`, `min-os`, `subsystem-version`                          |
 | `macho`           | `needs`, `dylib-compat`, `rpath`, `macos-min`, `code-signature` |
-| `macho-universal` | `slices`, one full `macho` profile per architecture             |
 | `archive`         | nothing further                                                 |
+| `macho-universal` | `slices`, one full `macho` profile per architecture             |
+| `archive-universal` | `slices`, one `archive` profile per architecture              |
 
-`arch` is a string everywhere except on a universal binary, where it is the
-sorted list of architectures the file carries. Such a file satisfies its
-triple when the right architecture is among them, and the Mach-O rules below
-are then applied to every slice separately.
+`arch` is a string everywhere except on a universal file, where it is the
+sorted list of architectures it carries and has to match the set of platforms
+the artifact is assembled from exactly, so that a missing or a stray slice both
+show up. Each slice is then checked against the triple of the platform it came
+from, which is how the two macOS slices can be held to different floors.
 
 Dependency names are whatever the container itself stores: a soname for ELF
 (`libc.so.6`), an import table entry for PE (`KERNEL32.dll`), an install name
@@ -233,8 +247,9 @@ which of libc, libm or libpthread pulled it in.
 3. **Every profile satisfies the invariants implied by its zig triple.** This
    is the part that still catches a bad build after someone has regenerated
    the manifest from it:
-   - the architecture has to be the one the triple names, so an `osx-arm64`
-     slot cannot quietly hold an x86-64 binary,
+   - the architectures have to be exactly the ones the triples name, so an
+     `osx-arm64` slot cannot quietly hold an x86-64 binary and a universal
+     file cannot quietly lose a slice,
    - no ELF may need a glibc above the version pinned in the triple,
    - a Mach-O has to declare exactly the macOS minimum the triple asks for,
    - an arm64 macOS binary has to carry a code signature, because arm64 macOS

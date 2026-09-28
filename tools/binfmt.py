@@ -9,15 +9,20 @@ its compatibility profile.
 `profile()` is the entry point. Which keys come back depends on the format,
 because the formats genuinely record different things:
 
-    all              format, arch
-    elf              needs, symbol-versions, runpath, min-kernel
-    pe               needs, min-os, subsystem-version
-    macho            needs, dylib-compat, rpath, macos-min, code-signature
-    macho-universal  slices, one full macho profile per architecture
-    archive          nothing beyond format and arch
+    all                format, arch
+    elf                needs, symbol-versions, runpath, min-kernel
+    pe                 needs, min-os, subsystem-version
+    macho              needs, dylib-compat, rpath, macos-min, code-signature
+    archive            nothing beyond format and arch
+    macho-universal    slices, one full macho profile per architecture
+    archive-universal  slices, one archive profile per architecture
 
 `arch` is a string everywhere except for a universal binary, where it is the
 sorted list of the architectures the file carries.
+
+`write_universal()` goes the other way and assembles such a file. It lives here
+because the universal macOS artifact has to be produced on hosts that have no
+`lipo`, which is every host except macOS itself.
 
 Dependency names are whatever the format itself stores: a soname for ELF
 (`libc.so.6`), an import table entry for PE (`KERNEL32.dll`), an install name
@@ -31,6 +36,7 @@ build time instead of checked afterwards.
 
 import re
 import struct
+from pathlib import Path
 
 
 class UnknownFormat(Exception):
@@ -302,9 +308,14 @@ def _macho_version(packed):
     return f"{packed >> 16}.{(packed >> 8) & 0xFF}.{packed & 0xFF}"
 
 
+def _macho_order(magic):
+    """Struct byte order prefix for a thin Mach-O with this magic."""
+    return "<" if magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe") else ">"
+
+
 def _macho(data):
     magic = data[:4]
-    order = "<" if magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe") else ">"
+    order = _macho_order(magic)
     is_64 = magic in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf")
 
     cpu_type, cpu_subtype = struct.unpack_from(order + "iI", data, 4)
@@ -361,7 +372,11 @@ def _macho(data):
 
 
 def _fat(data):
-    """A universal binary: several thin Mach-O images concatenated in one file."""
+    """A universal binary: several thin images concatenated into one file.
+
+    Apple wraps static libraries the same way, so a slice is either a thin
+    Mach-O image or an entire ar archive.
+    """
     # The fat header is always big endian, whatever the slices inside it are.
     is_64 = data[:4] == b"\xca\xfe\xba\xbf"
     count = struct.unpack_from(">I", data, 4)[0]
@@ -380,13 +395,70 @@ def _fat(data):
             entry, data, 8 + index * width)[:4]
         if offset + size > len(data):
             raise UnknownFormat("universal binary slice runs past the end of the file")
-        slices[_macho_arch(cpu_type, cpu_subtype)] = _macho(data[offset:offset + size])
+        body = data[offset:offset + size]
+        slices[_macho_arch(cpu_type, cpu_subtype)] = (
+            _archive(body) if body[:8] == b"!<arch>\n" else _macho(body))
 
+    # A fat container full of archives is not a loadable image, and calling it
+    # macho-universal would suggest it is, so the two are named apart.
+    kind = "archive" if all(s["format"] == "archive" for s in slices.values()) else "macho"
     return {
-        "format": "macho-universal",
+        "format": f"{kind}-universal",
         "arch": sorted(slices),
         "slices": dict(sorted(slices.items())),
     }
+
+
+# Slices start on a 2**14 boundary. That is what arm64 requires and what
+# Apple's own tooling uses there; over-aligning the x86-64 slice too costs a
+# few kilobytes of padding and saves the writer from having to care.
+_FAT_ALIGNMENT = 14
+
+
+def write_universal(sources, destination):
+    """Assembles thin Mach-O images, or thin archives, into one universal file.
+
+    The `lipo -create` half of the format, done here because the macOS
+    artifact has to be built on hosts where lipo does not exist.
+    """
+    bodies = [Path(source).read_bytes() for source in sources]
+
+    entries = []
+    offset = 8 + 20 * len(bodies)
+    for body in bodies:
+        offset = (offset + (1 << _FAT_ALIGNMENT) - 1) & ~((1 << _FAT_ALIGNMENT) - 1)
+        cpu_type, cpu_subtype = _slice_cpu(body)
+        entries.append((cpu_type, cpu_subtype, offset, len(body), _FAT_ALIGNMENT))
+        offset += len(body)
+
+    # The 32 bit header keeps offsets and sizes in four bytes each, and the 64
+    # bit one is only worth reaching for if that is not enough, which for these
+    # artifacts it always is.
+    if offset > 0xFFFFFFFF:
+        raise UnknownFormat("slices do not fit in a 32 bit universal binary")
+
+    # FAT_MAGIC, slice count, then one 20 byte record per slice.
+    out = bytearray(struct.pack(">II", 0xCAFEBABE, len(bodies)))
+    for entry in entries:
+        out += struct.pack(">iIIII", *entry)
+    for entry, body in zip(entries, bodies):
+        out += b"\0" * (entry[2] - len(out))
+        out += body
+
+    Path(destination).write_bytes(bytes(out))
+
+
+def _slice_cpu(body):
+    """The (cputype, cpusubtype) pair a universal header records for a slice."""
+    if body[:4] in _MACHO_MAGIC:
+        return struct.unpack_from(_macho_order(body[:4]) + "iI", body, 4)
+
+    if body[:8] == b"!<arch>\n":
+        for member in _archive_members(body):
+            if member[:4] in _MACHO_MAGIC:
+                return struct.unpack_from(_macho_order(member[:4]) + "iI", member, 4)
+
+    raise UnknownFormat("slice is neither a Mach-O image nor an archive of them")
 
 
 def _macho_arch(cpu_type, cpu_subtype):
@@ -410,10 +482,8 @@ def _macho_arch(cpu_type, cpu_subtype):
 _ARCHIVE_SPECIAL = {"", "/SYM64", "__.SYMDEF", "__.SYMDEF SORTED"}
 
 
-def _archive(data):
-    """An archive has no link information of its own, but its members have an
-    architecture, and that is worth pinning down: it is the only thing telling
-    a static library for one platform apart from one for another."""
+def _archive_members(data):
+    """Yields the bytes of each archive member that is an object file."""
     position = 8
     while position + 60 <= len(data):
         header = data[position:position + 16].decode("ascii", "replace").strip()
@@ -432,11 +502,19 @@ def _archive(data):
             name = header
 
         if name.rstrip("/") not in _ARCHIVE_SPECIAL:
-            arch = _member_arch(data[body:body + size])
-            if arch is not None:
-                return {"format": "archive", "arch": arch}
+            yield data[body:body + size]
 
         position = member_end
+
+
+def _archive(data):
+    """An archive has no link information of its own, but its members have an
+    architecture, and that is worth pinning down: it is the only thing telling
+    a static library for one platform apart from one for another."""
+    for member in _archive_members(data):
+        arch = _member_arch(member)
+        if arch is not None:
+            return {"format": "archive", "arch": arch}
 
     return {"format": "archive", "arch": "unknown"}
 
@@ -448,8 +526,8 @@ def _member_arch(member):
         return _ELF_MACHINES.get(machine, _unknown(machine))
 
     if member[:4] in _MACHO_MAGIC:
-        order = "<" if member[:4] in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe") else ">"
-        cpu_type, cpu_subtype = struct.unpack_from(order + "iI", member, 4)
+        cpu_type, cpu_subtype = struct.unpack_from(
+            _macho_order(member[:4]) + "iI", member, 4)
         return _macho_arch(cpu_type, cpu_subtype)
 
     # A COFF object has no magic; a known machine plus the optional header size

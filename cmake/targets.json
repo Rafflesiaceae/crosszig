@@ -31,5 +31,8 @@
             "cxx-driver": "cc",
             "compile-flags": "-Wno-unused-command-line-argument"
         }
+    },
+    "universal": {
+        "osx-universal": ["osx-64", "osx-arm64"]
     }
 }

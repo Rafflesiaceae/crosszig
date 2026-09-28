@@ -32,6 +32,12 @@
             "compile-flags": "-Wno-unused-command-line-argument"
         }
     },
+    "universal": {
+        "osx-universal": [
+            "osx-64",
+            "osx-arm64"
+        ]
+    },
     "files": {
         "crosszig-linux-64": {
             "platform": "linux-64",
@@ -53,33 +59,41 @@
             "runpath": [],
             "min-kernel": "2.0.0"
         },
-        "crosszig-osx-64": {
-            "platform": "osx-64",
-            "format": "macho",
-            "arch": "x86-64",
-            "needs": [
-                "/usr/lib/libSystem.B.dylib"
+        "crosszig-osx-universal": {
+            "platform": "osx-universal",
+            "format": "macho-universal",
+            "arch": [
+                "arm64",
+                "x86-64"
             ],
-            "dylib-compat": {
-                "/usr/lib/libSystem.B.dylib": "1.0.0"
-            },
-            "rpath": [],
-            "code-signature": false,
-            "macos-min": "10.12.0"
-        },
-        "crosszig-osx-arm64": {
-            "platform": "osx-arm64",
-            "format": "macho",
-            "arch": "arm64",
-            "needs": [
-                "/usr/lib/libSystem.B.dylib"
-            ],
-            "dylib-compat": {
-                "/usr/lib/libSystem.B.dylib": "1.0.0"
-            },
-            "rpath": [],
-            "code-signature": true,
-            "macos-min": "11.0.0"
+            "slices": {
+                "arm64": {
+                    "format": "macho",
+                    "arch": "arm64",
+                    "needs": [
+                        "/usr/lib/libSystem.B.dylib"
+                    ],
+                    "dylib-compat": {
+                        "/usr/lib/libSystem.B.dylib": "1.0.0"
+                    },
+                    "rpath": [],
+                    "code-signature": true,
+                    "macos-min": "11.0.0"
+                },
+                "x86-64": {
+                    "format": "macho",
+                    "arch": "x86-64",
+                    "needs": [
+                        "/usr/lib/libSystem.B.dylib"
+                    ],
+                    "dylib-compat": {
+                        "/usr/lib/libSystem.B.dylib": "1.0.0"
+                    },
+                    "rpath": [],
+                    "code-signature": false,
+                    "macos-min": "10.12.0"
+                }
+            }
         },
         "crosszig-win-64-msvc.exe": {
             "platform": "win-64-msvc",
@@ -113,15 +127,23 @@
             "format": "archive",
             "arch": "x86-64"
         },
-        "libcrosszig-osx-64.a": {
-            "platform": "osx-64",
-            "format": "archive",
-            "arch": "x86-64"
-        },
-        "libcrosszig-osx-arm64.a": {
-            "platform": "osx-arm64",
-            "format": "archive",
-            "arch": "arm64"
+        "libcrosszig-osx-universal.a": {
+            "platform": "osx-universal",
+            "format": "archive-universal",
+            "arch": [
+                "arm64",
+                "x86-64"
+            ],
+            "slices": {
+                "arm64": {
+                    "format": "archive",
+                    "arch": "arm64"
+                },
+                "x86-64": {
+                    "format": "archive",
+                    "arch": "x86-64"
+                }
+            }
         },
         "libcrosszig-win-64.a": {
             "platform": "win-64",

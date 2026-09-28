@@ -91,9 +91,45 @@ def reexec_in_pixi():
     sys.exit(subprocess.call(command, env=env))
 
 
-def run(command, **kwargs):
-    print("+ " + " ".join(str(part) for part in command), flush=True)
-    subprocess.run([str(part) for part in command], check=True, **kwargs)
+# Microsoft's prebuilt CRT objects name PDB files that exist only on their
+# build machines, and the several gigabytes of debug symbols that would
+# satisfy them are deliberately not downloaded. lld says so once per object,
+# which is around a hundred lines on every win-64-msvc link. It cannot be
+# turned off at the source - zig silently drops unrecognised -Xlinker flags,
+# so /IGNORE:4099 never reaches the linker - so it is dropped here instead,
+# counted rather than hidden, and `--verbose` brings it all back.
+LINKER_NOISE = re.compile(
+    r"^(lld-link: warning: Cannot use debug info for .*\[LNK4099\]"
+    r"|>>> failed to load reference .*\.pdb.*)$")
+
+
+def run(command, filter_noise=False):
+    text = [str(part) for part in command]
+    print("+ " + " ".join(text), flush=True)
+
+    if not filter_noise:
+        subprocess.run(text, check=True)
+        return
+
+    process = subprocess.Popen(text, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+    suppressed = 0
+    dropping = False
+    for line in process.stdout:
+        line = line.rstrip("\n")
+        # Each warning comes as a pair of lines followed by a blank one.
+        if LINKER_NOISE.match(line) or (dropping and not line.strip()):
+            suppressed += 1
+            dropping = True
+            continue
+        dropping = False
+        print(line, flush=True)
+
+    if process.wait() != 0:
+        raise subprocess.CalledProcessError(process.returncode, text)
+    if suppressed:
+        print(f"  ({suppressed} lines of LNK4099 debug-info noise from Microsoft's "
+              f"prebuilt libraries hidden, --verbose shows them)", flush=True)
 
 
 def config_name(release):
@@ -109,7 +145,7 @@ def install_dir(target, config):
     return build_dir(target, config) / "install"
 
 
-def build_one(target, config, jobs=None, clean=False):
+def build_one(target, config, jobs=None, clean=False, verbose=False):
     """Configure, build and install a single target platform."""
     output = build_dir(target, config)
     cpu, platforms = toolchain_targets()
@@ -146,7 +182,7 @@ def build_one(target, config, jobs=None, clean=False):
     build_command = ["cmake", "--build", output]
     if jobs:
         build_command += ["--parallel", str(jobs)]
-    run(build_command)
+    run(build_command, filter_noise=not verbose)
 
     run(["cmake", "--install", output, "--prefix", install_dir(target, config)])
 
@@ -340,13 +376,14 @@ def command_build(args):
 
     for target in targets:
         print(f"\n== {target} ({config}) ==", flush=True)
-        build_one(target, config, jobs=args.jobs, clean=args.clean)
+        build_one(target, config, jobs=args.jobs, clean=args.clean,
+                  verbose=args.verbose)
 
 
 def command_run(args):
     target = host_platform()
     config = config_name(args.release)
-    build_one(target, config, jobs=args.jobs)
+    build_one(target, config, jobs=args.jobs, verbose=args.verbose)
 
     suffix = ".exe" if target == "win-64" else ""
     run([install_dir(target, config) / "bin" / f"crosszig{suffix}", *args.args])
@@ -410,6 +447,8 @@ def main():
     def add_release_flag(subparser):
         subparser.add_argument("-r", "--release", action="store_true",
                                help="use the release configuration (default: debug)")
+        subparser.add_argument("-v", "--verbose", action="store_true",
+                               help="show the build output unfiltered")
 
     build = subparsers.add_parser("build", help="cross compile the project")
     add_release_flag(build)

@@ -12,6 +12,7 @@ environment.
 ./dev.py build              # debug build for the host platform
 ./dev.py build -r -a        # release build for every supported platform
 ./dev.py build -t win-64    # debug build for Windows only
+./dev.py build -v           # same, with the build output unfiltered
 ./dev.py run -r             # build for the host and run the binary
 ./dev.py dist               # collect the release artifacts into ./dist
 ./dev.py dist-check ./dist  # check a directory against dist-manifest.json
@@ -137,6 +138,14 @@ in `cmake/targets.json`:
   file extension and leaves the standard library to MSVC.
 * **Two of CMake's link rules need correcting**, in
   `cmake/ZigLinkRules.cmake`. See the comment at the top of that file.
+
+Linking it also produces about a hundred `LNK4099` warnings, because
+Microsoft's prebuilt CRT objects name PDB files that exist only on their build
+machines and the gigabytes of debug symbols that would satisfy them are
+deliberately not downloaded. There is no way to switch that off at the source:
+zig silently drops unrecognised `-Xlinker` flags, so `/IGNORE:4099` never
+reaches the linker. `dev.py` drops those lines from the build output and
+prints how many it dropped; `./dev.py build --verbose` shows them.
 
 Editing a triple discards the affected build directory automatically. The
 triple lives inside the generated compiler shims rather than in the compile

@@ -1,0 +1,18 @@
+[workspace]
+authors = ["User <user.user@gmail.com>"]
+channels = ["conda-forge"]
+name = "omni-bot"
+platforms = ["linux-64", "win-64", "osx-64", "osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+dev = { cmd = ["python", "./dev.py"] }
+
+[dependencies]
+cmake = "4.4.3.*"
+ninja = "1.13.2.*"
+python = "3.14.7.*"
+# FIXME: Zig 0.16.0 currently causes issues:
+#   - cannot create static archives on Intel macOS hosts.
+#   - panics during cold Linux C++ cross-links on Windows hosts.
+zig = "0.15.2.*"

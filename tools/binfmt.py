@@ -12,11 +12,17 @@ a soname for ELF (`libc.so.6`), an import table entry for PE
 (`/usr/lib/libSystem.B.dylib`).
 """
 
+import re
 import struct
 
 
 class UnknownFormat(Exception):
     """Raised for a file whose container format is not recognised."""
+
+
+def version_tuple(text):
+    """`"2.28"` becomes `(2, 28)`, so that versions compare numerically."""
+    return tuple(int(part) for part in text.split("."))
 
 
 def dynamic_dependencies(path):
@@ -46,31 +52,37 @@ def _cstring(data, offset):
     return data[offset:end].decode("utf-8", "replace")
 
 
-def _elf(data):
+def _elf_sections(data):
+    """Returns the byte order and the section table as (type, offset, size, link)."""
     is_64 = data[4] == 2
     order = "<" if data[5] == 1 else ">"
 
-    # Section headers are the shortest route to the .dynamic section; walking
-    # the program headers instead would mean translating virtual addresses.
+    # Section headers are the shortest route to the tables below; walking the
+    # program headers instead would mean translating virtual addresses.
     if is_64:
         section_offset = struct.unpack_from(order + "Q", data, 0x28)[0]
         entry_size, count = struct.unpack_from(order + "HH", data, 0x3A)
         fields = order + "II8x8xQQI"  # sh_name, sh_type, .., sh_offset, sh_size, sh_link
-        dyn_entry = order + "qQ"
     else:
         section_offset = struct.unpack_from(order + "I", data, 0x20)[0]
         entry_size, count = struct.unpack_from(order + "HH", data, 0x2E)
         fields = order + "II4x4xIII"
-        dyn_entry = order + "iI"
 
     sections = []
     for index in range(count):
-        base = section_offset + index * entry_size
-        _name, kind, offset, size, link = struct.unpack_from(fields, data, base)
+        _name, kind, offset, size, link = struct.unpack_from(
+            fields, data, section_offset + index * entry_size)
         sections.append((kind, offset, size, link))
 
-    needed = []
+    return order, is_64, sections
+
+
+def _elf(data):
+    order, is_64, sections = _elf_sections(data)
+    dyn_entry = order + ("qQ" if is_64 else "iI")
     entry_width = struct.calcsize(dyn_entry)
+
+    needed = []
     for kind, offset, size, link in sections:
         if kind != 6:  # SHT_DYNAMIC
             continue
@@ -156,3 +168,64 @@ def _macho(data):
         position += size
 
     return names
+
+
+SHT_GNU_VERNEED = 0x6FFFFFFE
+
+# Symbol version tokens look like `GLIBC_2.16`; `GLIBC_PRIVATE` also appears
+# and carries no version, so it has to be filtered out rather than parsed.
+_GLIBC_TOKEN = re.compile(r"^GLIBC_(\d+(?:\.\d+)*)$")
+
+
+def glibc_requirement(path):
+    """Highest glibc symbol version the file at `path` needs, e.g. `"2.16"`.
+
+    Returns None when the file is not ELF, or is ELF but references no
+    versioned glibc symbol at all. This is the number that decides which
+    distributions the binary will actually load on.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+
+    if data[:4] != b"\x7fELF":
+        return None
+
+    order, _is_64, sections = _elf_sections(data)
+
+    highest = None
+    for kind, offset, _size, link in sections:
+        if kind != SHT_GNU_VERNEED:
+            continue
+
+        # sh_link points at the string table holding the version names.
+        strtab = sections[link][1]
+
+        position = offset
+        while True:
+            # Elf_Verneed: version, count, file name, offset to the first aux
+            # entry, offset to the next verneed. Both offsets are relative to
+            # the entry they are stored in.
+            _version, count, _file, aux, next_entry = struct.unpack_from(
+                order + "HHIII", data, position)
+
+            aux_position = position + aux
+            for _ in range(count):
+                # Elf_Vernaux: hash, flags, other, name, offset to the next.
+                _hash, _flags, _other, name, aux_next = struct.unpack_from(
+                    order + "IHHII", data, aux_position)
+
+                match = _GLIBC_TOKEN.match(_cstring(data, strtab + name))
+                if match:
+                    found = version_tuple(match.group(1))
+                    if highest is None or found > highest:
+                        highest = found
+
+                if aux_next == 0:
+                    break
+                aux_position += aux_next
+
+            if next_entry == 0:
+                break
+            position += next_entry
+
+    return ".".join(str(part) for part in highest) if highest else None

@@ -8,3 +8,6 @@ dist/
 
 # shared FetchContent download/extraction cache
 .cache/
+
+# python bytecode
+__pycache__/

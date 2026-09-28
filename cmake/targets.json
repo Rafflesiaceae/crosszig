@@ -15,7 +15,7 @@
         "osx-64": {
             "system": "Darwin",
             "processor": "x86_64",
-            "triple": "x86_64-macos.11.0-none"
+            "triple": "x86_64-macos.10.12-none"
         },
         "osx-arm64": {
             "system": "Darwin",

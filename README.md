@@ -79,10 +79,15 @@ of those triples are deliberate choices rather than defaults:
   resolve to older versions on their own once the triple asks for one, and the
   third is covered by `src/compat/glibc_compat.cpp`, because zig's prebuilt
   libc++abi calls `aligned_alloc` no matter which glibc is targeted.
-* **`macos.11.0`** pins the macOS deployment target to Big Sur. zig's own
-  default is considerably newer, which would exclude perfectly current
-  machines for no reason. Note the version needs a minor component:
-  `x86_64-macos.11-none` is rejected as `InvalidOperatingSystemVersion`.
+* **`macos.10.12`** and **`macos.11.0`** pin the deployment target, Sierra
+  for Intel and Big Sur for Apple Silicon. zig's own default is considerably
+  newer, which would exclude perfectly current machines for no reason. 11.0 is
+  the floor for arm64 by definition, since that is where Apple Silicon starts;
+  Intel can go lower and 10.9 still links, but zig's bundled `libSystem.tbd`
+  carries no per-symbol availability information, so nothing would verify that
+  every symbol referenced actually existed that far back. Note the version
+  needs a minor component: `x86_64-macos.11-none` is rejected as
+  `InvalidOperatingSystemVersion`.
 * **`"cpu": "baseline"`** pins the instruction set. zig already defaults to
   this for a cross target, but it is stated explicitly because it is the one
   compatibility property that cannot be verified after the fact.

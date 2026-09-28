@@ -106,6 +106,16 @@ of those triples are deliberate choices rather than defaults:
 The two Windows targets additionally carry an `sdk`, a `cxx-driver`, a
 `cxx-standard` and a `compile-flags`. See below for why.
 
+One flag the toolchain adds for every target is `-fsanitize-trap=undefined`.
+zig turns UBSan on for debug builds and links its own runtime to service it,
+and that runtime calls `openat64` and `pwritev64`, which are glibc 2.4 and
+2.10. Targeting 2.3.3 therefore made debug builds fail to link outright, and
+took CMake's compiler ABI probe down with them, which left `CMAKE_SIZEOF_VOID_P`
+unset and produced a `GNUInstallDirs` warning some way downstream in Boost.
+Trapping keeps every check and needs no runtime, so a debug build still
+catches undefined behaviour, just as `SIGILL` rather than as a printed
+diagnostic. Release builds are unaffected, since zig enables no checks there.
+
 ### Why Windows goes through the MSVC ABI
 
 The C runtime is what decides how far back a Windows binary reaches, and zig

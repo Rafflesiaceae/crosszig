@@ -218,6 +218,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     string(APPEND _crosszig_link_flags " -L${_crosszig_zig_lib_dir}/libc/darwin")
 endif()
 
+# zig enables UBSan for C and C++ in debug builds and satisfies it by linking
+# its own runtime. That runtime is Zig standard library code, and it calls
+# openat64 and pwritev64, which arrived in glibc 2.4 and 2.10. Every target
+# asking for anything older therefore fails to link a debug build at all -
+# including the small program CMake links to read the compiler's ABI, which
+# is why CMAKE_SIZEOF_VOID_P ends up unset and GNUInstallDirs then warns that
+# it cannot pick a default library directory.
+#
+# Trapping keeps the checks and drops the runtime: a violation becomes an
+# illegal instruction instead of a printed diagnostic. This only changes how
+# checks that are already on report themselves, so release builds, where zig
+# turns them off, are unaffected.
+string(APPEND _crosszig_compile_flags " -fsanitize-trap=undefined")
+
 # Plain assignment, not append: this file is re-read once per language and
 # again for every try_compile, and appending would stack the flags up.
 set(CMAKE_C_FLAGS_INIT "${_crosszig_compile_flags}")

@@ -9,11 +9,15 @@ its compatibility profile.
 `profile()` is the entry point. Which keys come back depends on the format,
 because the formats genuinely record different things:
 
-    all         format, arch
-    elf         needs, symbol-versions, runpath, min-kernel
-    pe          needs, min-os, subsystem-version
-    macho       needs, dylib-compat, rpath, macos-min, code-signature
-    archive     nothing beyond format and arch
+    all              format, arch
+    elf              needs, symbol-versions, runpath, min-kernel
+    pe               needs, min-os, subsystem-version
+    macho            needs, dylib-compat, rpath, macos-min, code-signature
+    macho-universal  slices, one full macho profile per architecture
+    archive          nothing beyond format and arch
+
+`arch` is a string everywhere except for a universal binary, where it is the
+sorted list of the architectures the file carries.
 
 Dependency names are whatever the format itself stores: a soname for ELF
 (`libc.so.6`), an import table entry for PE (`KERNEL32.dll`), an install name
@@ -46,6 +50,8 @@ _MACHO_CPUS = {7: "x86", 12: "arm", 0x01000007: "x86-64", 0x0100000C: "arm64"}
 
 _MACHO_MAGIC = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
                 b"\xfe\xed\xfa\xce")
+# FAT_MAGIC and FAT_MAGIC_64, the wrappers around several thin Mach-O images.
+_FAT_MAGIC = (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf")
 
 
 def profile(path):
@@ -57,6 +63,8 @@ def profile(path):
         return _elf(data)
     if data[:2] == b"MZ":
         return _pe(data)
+    if data[:4] in _FAT_MAGIC:
+        return _fat(data)
     if data[:4] in _MACHO_MAGIC:
         return _macho(data)
     if data[:8] == b"!<arch>\n":
@@ -350,6 +358,35 @@ def _macho(data):
     if macos_min is not None:
         result["macos-min"] = macos_min
     return result
+
+
+def _fat(data):
+    """A universal binary: several thin Mach-O images concatenated in one file."""
+    # The fat header is always big endian, whatever the slices inside it are.
+    is_64 = data[:4] == b"\xca\xfe\xba\xbf"
+    count = struct.unpack_from(">I", data, 4)[0]
+    entry = ">iiQQII" if is_64 else ">iiIII"
+    width = struct.calcsize(entry)
+
+    # `cafebabe` is also the Java class file magic, where this field holds a
+    # version number instead. A plausible slice count plus in-range slices is
+    # what tells the two apart.
+    if not 0 < count <= 64:
+        raise UnknownFormat("not a universal binary")
+
+    slices = {}
+    for index in range(count):
+        cpu_type, cpu_subtype, offset, size = struct.unpack_from(
+            entry, data, 8 + index * width)[:4]
+        if offset + size > len(data):
+            raise UnknownFormat("universal binary slice runs past the end of the file")
+        slices[_macho_arch(cpu_type, cpu_subtype)] = _macho(data[offset:offset + size])
+
+    return {
+        "format": "macho-universal",
+        "arch": sorted(slices),
+        "slices": dict(sorted(slices.items())),
+    }
 
 
 def _macho_arch(cpu_type, cpu_subtype):

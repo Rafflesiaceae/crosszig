@@ -148,13 +148,19 @@ file that was collected.
 Which profile keys appear depends on the format, because the formats record
 genuinely different things:
 
-| Format    | Keys                                                            |
-| --------- | --------------------------------------------------------------- |
-| all       | `format`, `arch`                                                  |
-| `elf`     | `needs`, `symbol-versions`, `runpath`, `min-kernel`               |
-| `pe`      | `needs`, `min-os`, `subsystem-version`                            |
-| `macho`   | `needs`, `dylib-compat`, `rpath`, `macos-min`, `code-signature`   |
-| `archive` | nothing further                                                   |
+| Format            | Keys                                                          |
+| ----------------- | ------------------------------------------------------------- |
+| all               | `format`, `arch`                                                |
+| `elf`             | `needs`, `symbol-versions`, `runpath`, `min-kernel`             |
+| `pe`              | `needs`, `min-os`, `subsystem-version`                          |
+| `macho`           | `needs`, `dylib-compat`, `rpath`, `macos-min`, `code-signature` |
+| `macho-universal` | `slices`, one full `macho` profile per architecture             |
+| `archive`         | nothing further                                                 |
+
+`arch` is a string everywhere except on a universal binary, where it is the
+sorted list of architectures the file carries. Such a file satisfies its
+triple when the right architecture is among them, and the Mach-O rules below
+are then applied to every slice separately.
 
 Dependency names are whatever the container itself stores: a soname for ELF
 (`libc.so.6`), an import table entry for PE (`KERNEL32.dll`), an install name

@@ -208,25 +208,52 @@ def compare_profile(name, recorded, found):
     return problems
 
 
+def check_search_paths(label, found):
+    """Nothing here should carry a library search path; one means a build
+    directory leaked into the artifact."""
+    return [f"{label}: {key} is not empty: {found[key]}"
+            for key in ("runpath", "rpath") if found.get(key)]
+
+
+def check_macho(label, found, triple):
+    """The Mach-O rules, applied to a thin file or to one slice of a fat one."""
+    problems = check_search_paths(label, found)
+
+    floor = re.search(r"-macos\.([0-9][0-9.]*)-", triple)
+    declared = found.get("macos-min")
+    if floor and (declared is None or
+                  binfmt.version_tuple(declared) != binfmt.version_tuple(floor.group(1))):
+        problems.append(f"{label}: declares macOS {declared}, "
+                        f"but {triple} targets {floor.group(1)}")
+
+    # arm64 macOS will not execute an unsigned binary at all.
+    if found.get("arch", "").startswith("arm64") and not found.get("code-signature"):
+        problems.append(f"{label}: arm64 macOS binary carries no code signature")
+
+    return problems
+
+
 def check_invariants(name, found, triple):
     """Checks the profile against the build inputs rather than against the
     manifest, so that a manifest regenerated from a broken build still fails.
     """
-    problems = []
-
     if triple is None:
         return [f"{name}: no known platform in the file name"]
 
+    problems = []
+
+    # A universal binary reports a list of architectures and satisfies the
+    # triple as long as it carries the right one among them.
+    architectures = found.get("arch")
+    if not isinstance(architectures, list):
+        architectures = [architectures]
+
     expected_arch = ARCH_BY_TRIPLE.get(triple.split("-")[0])
-    if expected_arch and found.get("arch") != expected_arch:
+    if expected_arch and expected_arch not in architectures:
         problems.append(
             f"{name}: built for {found.get('arch')}, but {triple} targets {expected_arch}")
 
-    # Nothing here should ever need a search path baked into it; one showing up
-    # means a build directory leaked into the artifact.
-    for key in ("runpath", "rpath"):
-        if found.get(key):
-            problems.append(f"{name}: {key} is not empty: {found[key]}")
+    problems += check_search_paths(name, found)
 
     if found.get("format") == "elf":
         ceiling = re.search(r"-gnu\.([0-9][0-9.]*)$", triple)
@@ -237,16 +264,9 @@ def check_invariants(name, found, triple):
                 f"{name}: needs glibc {needed}, above the targeted {ceiling.group(1)}")
 
     if found.get("format") == "macho":
-        floor = re.search(r"-macos\.([0-9][0-9.]*)-", triple)
-        declared = found.get("macos-min")
-        if floor and (declared is None or
-                      binfmt.version_tuple(declared) != binfmt.version_tuple(floor.group(1))):
-            problems.append(
-                f"{name}: declares macOS {declared}, but {triple} targets {floor.group(1)}")
-
-        # arm64 macOS will not execute an unsigned binary at all.
-        if found.get("arch", "").startswith("arm64") and not found.get("code-signature"):
-            problems.append(f"{name}: arm64 macOS binary carries no code signature")
+        problems += check_macho(name, found, triple)
+    for slice_arch, slice_profile in sorted(found.get("slices", {}).items()):
+        problems += check_macho(f"{name} [{slice_arch}]", slice_profile, triple)
 
     return problems
 

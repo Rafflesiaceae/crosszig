@@ -9,6 +9,7 @@ produce binaries for any supported target:
     ./dev.py build -t win-64-msvc  # debug, for Windows only
     ./dev.py run -r                # build for the host and run the binary
     ./dev.py dist                  # collect the release build of every platform
+    ./dev.py dist --debug          # the same for the debug build, into ./dist-debug
     ./dev.py dist-check ./dist     # check a directory against dist-manifest.json
     ./dev.py clean
 """
@@ -26,8 +27,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 BUILD_ROOT = ROOT / "build"
-DIST_DIR = ROOT / "dist"
-MANIFEST = ROOT / "dist-manifest.json"
+
+# Each configuration is collected into its own directory and locked down by its
+# own manifest. The two record the same facts as things stand, which is the
+# point worth locking down: nothing forces a debug build to depend on what a
+# release build depends on, and giving each its own manifest is what turns a
+# divergence into a diff on one of them rather than a shared manifest that no
+# configuration quite matches.
+DIST = {
+    "Release": (ROOT / "dist", ROOT / "dist-manifest.json"),
+    "Debug": (ROOT / "dist-debug", ROOT / "dist-manifest-debug.json"),
+}
 TOOLCHAIN = ROOT / "cmake" / "ZigToolchain.cmake"
 TARGETS = ROOT / "cmake" / "targets.json"
 
@@ -233,18 +243,18 @@ def dist_name(path, target):
     return f"{path.stem}-{target}{path.suffix}"
 
 
-def check_dist(directory):
-    """Verifies `directory` against dist-manifest.json. True when it is clean.
+def check_dist(directory, manifest_path):
+    """Verifies `directory` against a manifest. True when it is clean.
 
     The manifest is a lock file and nothing more: every file it lists has to
     be present and to read back the facts recorded for it, and nothing may be
     present that it does not list. Whether a difference is acceptable is a
     question for whoever reads the diff, not for this script.
     """
-    if not MANIFEST.is_file():
-        sys.exit(f"dev.py: no manifest at {MANIFEST}")
+    if not manifest_path.is_file():
+        sys.exit(f"dev.py: no manifest at {manifest_path}")
 
-    manifest = json.loads(MANIFEST.read_text())
+    manifest = json.loads(manifest_path.read_text())
     problems = dist_manifest.check(directory, manifest)
 
     if problems:
@@ -293,7 +303,7 @@ def installed_files(target, config):
     return found
 
 
-def collect_universal(name, members, config):
+def collect_universal(name, members, config, dist_dir):
     """Folds the matching artifact of every member platform into one fat file.
 
     Members are paired up by file name, which is what the install layout gives
@@ -309,7 +319,7 @@ def collect_universal(name, members, config):
             sys.exit(f"dev.py: {file_name} was built for only "
                      f"{len(sources)} of the {len(members)} {name} platforms")
 
-        destination = DIST_DIR / dist_name(Path(file_name), name)
+        destination = dist_dir / dist_name(Path(file_name), name)
         universal.write(sources, destination)
         # The writer only writes bytes; an executable has to stay one.
         shutil.copymode(sources[0], destination)
@@ -317,36 +327,34 @@ def collect_universal(name, members, config):
 
 
 def command_dist(args):
-    # Always the release build: a debug binary pulls in extra imports (the
-    # Windows one picks up ntdll.dll, for instance), so a manifest could not
-    # describe both configurations at once.
-    config = "Release"
+    config = config_name(not args.debug)
+    dist_dir, manifest_path = DIST[config]
 
     missing = [target for target in PLATFORMS if not install_dir(target, config).is_dir()]
     if missing:
-        sys.exit("dev.py: nothing built for {}; run `./dev.py build -r -a` first".format(
-            ", ".join(missing)))
+        sys.exit("dev.py: nothing built for {}; run `./dev.py build {}-a` first".format(
+            ", ".join(missing), "" if args.debug else "-r "))
 
     # Rebuilt from scratch every time, so that artifacts of a platform that was
     # dropped in the meantime cannot linger.
-    shutil.rmtree(DIST_DIR, ignore_errors=True)
-    DIST_DIR.mkdir(parents=True)
+    shutil.rmtree(dist_dir, ignore_errors=True)
+    dist_dir.mkdir(parents=True)
 
     for target in sorted(set(PLATFORMS) - GROUPED):
         for source in installed_files(target, config):
-            destination = DIST_DIR / dist_name(source, target)
+            destination = dist_dir / dist_name(source, target)
             shutil.copy2(source, destination)
             print(f"  {destination.relative_to(ROOT)}", flush=True)
 
     for name, members in sorted(UNIVERSAL.items()):
-        collect_universal(name, members, config)
+        collect_universal(name, members, config, dist_dir)
 
     if args.write_manifest:
-        MANIFEST.write_text(json.dumps(
-            dist_manifest.record(DIST_DIR), indent=4) + "\n")
-        print(f"\nwrote {MANIFEST.relative_to(ROOT)}", flush=True)
+        manifest_path.write_text(json.dumps(
+            dist_manifest.record(dist_dir), indent=4) + "\n")
+        print(f"\nwrote {manifest_path.relative_to(ROOT)}", flush=True)
 
-    if not check_dist(DIST_DIR):
+    if not check_dist(dist_dir, manifest_path):
         sys.exit(1)
 
 
@@ -354,12 +362,15 @@ def command_dist_check(args):
     directory = Path(args.directory).resolve()
     if not directory.is_dir():
         sys.exit(f"dev.py: {directory} is not a directory")
-    if not check_dist(directory):
+    # Which manifest to hold the directory to, not which one it came from: the
+    # directory can sit anywhere, so its name says nothing about it.
+    _dist_dir, manifest_path = DIST[config_name(not args.debug)]
+    if not check_dist(directory, manifest_path):
         sys.exit(1)
 
 
 def command_clean(_args):
-    for directory in (BUILD_ROOT, DIST_DIR):
+    for directory in (BUILD_ROOT, *(dist_dir for dist_dir, _manifest in DIST.values())):
         print(f"removing {directory}", flush=True)
         shutil.rmtree(directory, ignore_errors=True)
 
@@ -396,14 +407,19 @@ def main():
     dist = subparsers.add_parser(
         "dist", help="collect the release artifacts of every platform into ./dist "
                      "and check them")
+    dist.add_argument("--debug", action="store_true",
+                      help="collect the debug build into ./dist-debug and check it "
+                           "against dist-manifest-debug.json instead")
     dist.add_argument("--write-manifest", action="store_true",
-                      help="regenerate dist-manifest.json from what was collected, "
+                      help="regenerate the manifest from what was collected, "
                            "instead of keeping the current one")
     dist.set_defaults(func=command_dist)
 
     dist_check = subparsers.add_parser(
         "dist-check", help="check a directory against dist-manifest.json")
     dist_check.add_argument("directory", help="directory holding the distribution")
+    dist_check.add_argument("--debug", action="store_true",
+                            help="check against dist-manifest-debug.json instead")
     dist_check.set_defaults(func=command_dist_check)
 
     clean = subparsers.add_parser("clean", help="remove the build and dist directories")

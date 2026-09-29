@@ -5,6 +5,7 @@
 # build outputs
 build/
 dist/
+dist-debug/
 
 # shared FetchContent download/extraction cache
 .cache/

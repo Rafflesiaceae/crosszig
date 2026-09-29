@@ -15,8 +15,9 @@ installed on the machine beyond the pixi environment.
 ./dev.py build -v           # same, with the build output unfiltered
 ./dev.py run -r             # build for the host and run the binary
 ./dev.py dist               # collect the release artifacts into ./dist
+./dev.py dist --debug       # collect the debug artifacts into ./dist-debug
 ./dev.py dist-check ./dist  # check a directory against dist-manifest.json
-./dev.py clean              # remove build/ and dist/
+./dev.py clean              # remove build/, dist/ and dist-debug/
 ```
 
 `tools/dist-manifest.py` is a standalone script and works on its own, on any
@@ -45,7 +46,8 @@ installs into `build/<platform>-<config>/install/`.
 | `dev.py`                   | Thin cross-platform wrapper around the CMake commands         |
 | `tools/dist-manifest.py`   | Standalone lock-file tool for binaries: reads ELF, PE and Mach-O |
 | `tools/macos-universal.py` | Standalone `lipo -create`: combines thin macOS files into one |
-| `dist-manifest.json`       | The lock file it keeps for this project's distribution        |
+| `dist-manifest.json`       | The lock file it keeps for the release distribution           |
+| `dist-manifest-debug.json` | The same, for the debug distribution                          |
 
 `src/` produces two things:
 
@@ -207,7 +209,7 @@ section of `cmake/targets.json` says which platform builds get folded together:
 ```
 
 Those platforms are still built separately, they are just not copied out on
-their own. Assembling the container is `tools/universal.py` rather than
+their own. Assembling the container is `tools/macos-universal.py` rather than
 `lipo`, because `lipo` only exists on macOS and this has to work on every
 host. It handles static libraries too, which Apple wraps in the same format.
 
@@ -215,6 +217,14 @@ It then verifies the result against `dist-manifest.json` and fails if anything
 is off. `./dev.py dist-check <dir>` runs the same verification on its own, so a
 distribution can also be checked after the fact, for instance once it has been
 unpacked somewhere else.
+
+`./dev.py dist --debug` does all of the above for the debug build instead: it
+collects into `./dist-debug/` and checks against `dist-manifest-debug.json`.
+`./dev.py dist-check <dir> --debug` picks the debug manifest the same way. The
+two configurations are kept in separate directories with separate manifests
+because nothing obliges a debug build to depend on what a release build
+depends on, and the point of checking debug at all is to notice when it stops
+doing so.
 
 ### The manifest tool
 
@@ -335,10 +345,12 @@ runtime. That is why `cpu` is pinned in `cmake/targets.json` and passed to zig
 explicitly: the manifest can only lock down what a container actually stores,
 and this is not one of those things.
 
-`dist` deliberately only handles the release build: a debug binary picks up
-extra imports (`ntdll.dll` on Windows, for one), so a single manifest could not
-describe both configurations. Use `./dev.py dist --write-manifest` to
-regenerate the manifest after an intentional change.
+As things stand the two manifests are byte-identical: the debug build of every
+platform depends on exactly what the release build depends on. That is worth
+having written down rather than assumed, because it is the kind of thing a
+toolchain upgrade quietly breaks. Use `./dev.py dist --write-manifest`, or
+`./dev.py dist --debug --write-manifest`, to regenerate the relevant manifest
+after an intentional change.
 
 ## Dependency cache
 

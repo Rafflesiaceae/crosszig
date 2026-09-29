@@ -51,7 +51,7 @@ def load_tool(file_name):
 # binaries and locks down what they depend on, the other writes the universal
 # macOS container.
 dist_manifest = load_tool("dist-manifest.py")
-universal = load_tool("universal.py")
+universal = load_tool("macos-universal.py")
 
 # The one place the platforms are spelled out is cmake/targets.json, which the
 # toolchain file reads as well.

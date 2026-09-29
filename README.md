@@ -34,18 +34,18 @@ installs into `build/<platform>-<config>/install/`.
 
 ## Layout
 
-| Path                      | What it is                                                   |
-| ------------------------- | ------------------------------------------------------------ |
-| `src/`                    | Sample code: a log-line parser built on Boost.Regex           |
-| `cmake/ZigToolchain.cmake`| Toolchain file that turns `zig cc` / `zig c++` into a cross compiler |
-| `cmake/targets.json`      | The zig triple and CPU baseline each platform builds with     |
-| `cmake/ZigLinkRules.cmake`| Two link rule corrections needed for the MSVC ABI target      |
-| `tools/xwin.py`           | Fetches and caches Microsoft's CRT and SDK for the Windows targets |
-| `cmake/Dependencies.cmake`| Fetches Boost and shares one checkout across all platforms    |
-| `dev.py`                  | Thin cross-platform wrapper around the CMake commands         |
-| `tools/dist-manifest.py`  | Standalone lock-file tool for binaries: reads ELF, PE and Mach-O |
-| `tools/universal.py`      | Standalone `lipo -create`: combines thin macOS files into one |
-| `dist-manifest.json`      | The lock file it keeps for this project's distribution        |
+| Path                       | What it is                                                   |
+| -------------------------- | ------------------------------------------------------------ |
+| `src/`                     | Sample code: a log-line parser built on Boost.Regex           |
+| `cmake/ZigToolchain.cmake` | Toolchain file that turns `zig cc` / `zig c++` into a cross compiler |
+| `cmake/targets.json`       | The zig triple and CPU baseline each platform builds with     |
+| `cmake/ZigLinkRules.cmake` | Two link rule corrections needed for the MSVC ABI target      |
+| `tools/xwin.py`            | Fetches and caches Microsoft's CRT and SDK for the Windows targets |
+| `cmake/Dependencies.cmake` | Fetches Boost and shares one checkout across all platforms    |
+| `dev.py`                   | Thin cross-platform wrapper around the CMake commands         |
+| `tools/dist-manifest.py`   | Standalone lock-file tool for binaries: reads ELF, PE and Mach-O |
+| `tools/macos-universal.py` | Standalone `lipo -create`: combines thin macOS files into one |
+| `dist-manifest.json`       | The lock file it keeps for this project's distribution        |
 
 `src/` produces two things:
 

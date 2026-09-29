@@ -46,8 +46,7 @@ installs into `build/<platform>-<config>/install/`.
 | `dev.py`                   | Thin cross-platform wrapper around the CMake commands         |
 | `tools/dist-manifest.py`   | Standalone lock-file tool for binaries: reads ELF, PE and Mach-O |
 | `tools/macos-universal.py` | Standalone `lipo -create`: combines thin macOS files into one |
-| `dist-manifest.json`       | The lock file it keeps for the release distribution           |
-| `dist-manifest-debug.json` | The same, for the debug distribution                          |
+| `dist-manifest.json`       | The lock file it keeps for this project's distribution        |
 
 `src/` produces two things:
 
@@ -218,13 +217,10 @@ is off. `./dev.py dist-check <dir>` runs the same verification on its own, so a
 distribution can also be checked after the fact, for instance once it has been
 unpacked somewhere else.
 
-`./dev.py dist --debug` does all of the above for the debug build instead: it
-collects into `./dist-debug/` and checks against `dist-manifest-debug.json`.
-`./dev.py dist-check <dir> --debug` picks the debug manifest the same way. The
-two configurations are kept in separate directories with separate manifests
-because nothing obliges a debug build to depend on what a release build
-depends on, and the point of checking debug at all is to notice when it stops
-doing so.
+`./dev.py dist --debug` does all of the above for the debug build instead,
+collecting into `./dist-debug/`. It is held to the same `dist-manifest.json`,
+because the debug build of every platform depends on exactly what the release
+build depends on, down to the last imported symbol.
 
 ### The manifest tool
 
@@ -345,12 +341,12 @@ runtime. That is why `cpu` is pinned in `cmake/targets.json` and passed to zig
 explicitly: the manifest can only lock down what a container actually stores,
 and this is not one of those things.
 
-As things stand the two manifests are byte-identical: the debug build of every
-platform depends on exactly what the release build depends on. That is worth
-having written down rather than assumed, because it is the kind of thing a
-toolchain upgrade quietly breaks. Use `./dev.py dist --write-manifest`, or
-`./dev.py dist --debug --write-manifest`, to regenerate the relevant manifest
-after an intentional change.
+One manifest covering both configurations is the stronger statement of the
+two, and the reason `--debug` exists: a debug-only regression, such as the
+debug build picking up a library the release build does not, fails the check
+rather than being written off as an expected difference between the two. Use
+`./dev.py dist --write-manifest` to regenerate the manifest after an
+intentional change.
 
 ## Dependency cache
 

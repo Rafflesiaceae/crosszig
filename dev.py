@@ -28,16 +28,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BUILD_ROOT = ROOT / "build"
 
-# Each configuration is collected into its own directory and locked down by its
-# own manifest. The two record the same facts as things stand, which is the
-# point worth locking down: nothing forces a debug build to depend on what a
-# release build depends on, and giving each its own manifest is what turns a
-# divergence into a diff on one of them rather than a shared manifest that no
-# configuration quite matches.
-DIST = {
-    "Release": (ROOT / "dist", ROOT / "dist-manifest.json"),
-    "Debug": (ROOT / "dist-debug", ROOT / "dist-manifest-debug.json"),
+# Each configuration is collected into its own directory, but both are held to
+# the same manifest: the debug build of every platform depends on exactly what
+# the release build depends on, down to the last imported symbol. One lock file
+# is therefore enough, and it makes the stronger statement of the two - should
+# a configuration ever start depending on something the other does not, the
+# check fails instead of the difference being written off as expected.
+DIST_DIRS = {
+    "Release": ROOT / "dist",
+    "Debug": ROOT / "dist-debug",
 }
+MANIFEST = ROOT / "dist-manifest.json"
 TOOLCHAIN = ROOT / "cmake" / "ZigToolchain.cmake"
 TARGETS = ROOT / "cmake" / "targets.json"
 
@@ -243,18 +244,18 @@ def dist_name(path, target):
     return f"{path.stem}-{target}{path.suffix}"
 
 
-def check_dist(directory, manifest_path):
-    """Verifies `directory` against a manifest. True when it is clean.
+def check_dist(directory):
+    """Verifies `directory` against dist-manifest.json. True when it is clean.
 
     The manifest is a lock file and nothing more: every file it lists has to
     be present and to read back the facts recorded for it, and nothing may be
     present that it does not list. Whether a difference is acceptable is a
     question for whoever reads the diff, not for this script.
     """
-    if not manifest_path.is_file():
-        sys.exit(f"dev.py: no manifest at {manifest_path}")
+    if not MANIFEST.is_file():
+        sys.exit(f"dev.py: no manifest at {MANIFEST}")
 
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(MANIFEST.read_text())
     problems = dist_manifest.check(directory, manifest)
 
     if problems:
@@ -328,7 +329,7 @@ def collect_universal(name, members, config, dist_dir):
 
 def command_dist(args):
     config = config_name(not args.debug)
-    dist_dir, manifest_path = DIST[config]
+    dist_dir = DIST_DIRS[config]
 
     missing = [target for target in PLATFORMS if not install_dir(target, config).is_dir()]
     if missing:
@@ -350,11 +351,11 @@ def command_dist(args):
         collect_universal(name, members, config, dist_dir)
 
     if args.write_manifest:
-        manifest_path.write_text(json.dumps(
+        MANIFEST.write_text(json.dumps(
             dist_manifest.record(dist_dir), indent=4) + "\n")
-        print(f"\nwrote {manifest_path.relative_to(ROOT)}", flush=True)
+        print(f"\nwrote {MANIFEST.relative_to(ROOT)}", flush=True)
 
-    if not check_dist(dist_dir, manifest_path):
+    if not check_dist(dist_dir):
         sys.exit(1)
 
 
@@ -362,15 +363,12 @@ def command_dist_check(args):
     directory = Path(args.directory).resolve()
     if not directory.is_dir():
         sys.exit(f"dev.py: {directory} is not a directory")
-    # Which manifest to hold the directory to, not which one it came from: the
-    # directory can sit anywhere, so its name says nothing about it.
-    _dist_dir, manifest_path = DIST[config_name(not args.debug)]
-    if not check_dist(directory, manifest_path):
+    if not check_dist(directory):
         sys.exit(1)
 
 
 def command_clean(_args):
-    for directory in (BUILD_ROOT, *(dist_dir for dist_dir, _manifest in DIST.values())):
+    for directory in (BUILD_ROOT, *DIST_DIRS.values()):
         print(f"removing {directory}", flush=True)
         shutil.rmtree(directory, ignore_errors=True)
 
@@ -408,18 +406,16 @@ def main():
         "dist", help="collect the release artifacts of every platform into ./dist "
                      "and check them")
     dist.add_argument("--debug", action="store_true",
-                      help="collect the debug build into ./dist-debug and check it "
-                           "against dist-manifest-debug.json instead")
+                      help="collect the debug build into ./dist-debug instead; "
+                           "it is checked against the same manifest")
     dist.add_argument("--write-manifest", action="store_true",
-                      help="regenerate the manifest from what was collected, "
+                      help="regenerate dist-manifest.json from what was collected, "
                            "instead of keeping the current one")
     dist.set_defaults(func=command_dist)
 
     dist_check = subparsers.add_parser(
         "dist-check", help="check a directory against dist-manifest.json")
     dist_check.add_argument("directory", help="directory holding the distribution")
-    dist_check.add_argument("--debug", action="store_true",
-                            help="check against dist-manifest-debug.json instead")
     dist_check.set_defaults(func=command_dist_check)
 
     clean = subparsers.add_parser("clean", help="remove the build and dist directories")

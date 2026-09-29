@@ -7,6 +7,7 @@ produce binaries for any supported target:
     ./dev.py build                 # debug, for the host platform
     ./dev.py build -r -a           # release, for every supported platform
     ./dev.py build -t win-64-msvc  # debug, for Windows only
+    ./dev.py build -t              # list the platforms -t accepts
     ./dev.py run -r                # build for the host and run the binary
     ./dev.py dist                  # collect the release build of every platform
     ./dev.py dist --debug          # the same for the debug build, into ./dist-debug
@@ -82,6 +83,13 @@ REQUIRED_TOOLS = ["cmake", "ninja", "zig"]
 
 # The commands that shell out to the toolchain; the rest only touch files.
 TOOLCHAIN_COMMANDS = {"build", "run"}
+
+# What `-t` stands for when it is given no value, which asks for the list of
+# platforms rather than naming one. argparse cannot offer `choices` and accept
+# a valueless flag at the same time - the sentinel would have to be a choice
+# too, and would then show up in the usage line - so the names given to `-t`
+# are checked by hand instead.
+LIST_PLATFORMS = object()
 
 
 def host_platform():
@@ -268,10 +276,40 @@ def check_dist(directory):
     return True
 
 
+def print_platforms():
+    """Prints every platform `-t` accepts, and what each one builds for."""
+    _cpu, platforms = toolchain_targets()
+    host = host_platform()
+
+    # The platforms that are not shipped on their own, and the artifact each
+    # one is folded into, so that the list explains why `dist` produces fewer
+    # names than there are platforms here.
+    folded_into = {member: name
+                   for name, members in UNIVERSAL.items() for member in members}
+
+    name_width = max(len(name) for name in PLATFORMS)
+    triple_width = max(len(platforms[name]["triple"]) for name in PLATFORMS)
+
+    print("supported platforms:")
+    for name in PLATFORMS:
+        notes = []
+        if name == host:
+            notes.append("host")
+        if name in folded_into:
+            notes.append(f"shipped as {folded_into[name]}")
+        line = (f"  {name:<{name_width}}  {platforms[name]['triple']:<{triple_width}}"
+                f"  {', '.join(notes)}")
+        print(line.rstrip())
+
+
 def command_build(args):
     if args.all:
         targets = list(PLATFORMS)
     elif args.target:
+        unknown = [name for name in args.target if name not in PLATFORMS]
+        if unknown:
+            sys.exit("dev.py: unknown platform {}; `./dev.py build -t` "
+                     "lists the supported ones".format(", ".join(unknown)))
         targets = args.target
     else:
         targets = [host_platform()]
@@ -389,8 +427,10 @@ def main():
     build.add_argument("-j", "--jobs", type=int, help="number of parallel compile jobs")
     build.add_argument("-a", "--all", action="store_true",
                        help="build for every supported platform")
-    build.add_argument("-t", "--target", action="append", choices=PLATFORMS,
-                       help="build for this platform (repeatable, default: the host)")
+    build.add_argument("-t", "--target", action="append", nargs="?",
+                       const=LIST_PLATFORMS, metavar="PLATFORM",
+                       help="build for this platform (repeatable, default: the "
+                            "host); with no value, list the platforms instead")
     build.add_argument("--clean", action="store_true",
                        help="discard the existing build directory first")
     build.set_defaults(func=command_build)
@@ -422,6 +462,12 @@ def main():
     clean.set_defaults(func=command_clean)
 
     args = parser.parse_args()
+
+    # Listing the platforms reads one JSON file and needs neither the toolchain
+    # nor pixi, so it is answered before the re-exec rather than after it.
+    if args.command == "build" and args.target and LIST_PLATFORMS in args.target:
+        print_platforms()
+        return
 
     if args.command in TOOLCHAIN_COMMANDS:
         reexec_in_pixi()

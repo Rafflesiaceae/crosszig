@@ -13,6 +13,7 @@ installed on the machine beyond the pixi environment.
 ./dev.py build -r -a        # release build for every supported platform
 ./dev.py build -t win-64-msvc  # debug build for Windows only
 ./dev.py build -v           # same, with the build output unfiltered
+./dev.py build -t           # list the platforms -t accepts
 ./dev.py run -r             # build for the host and run the binary
 ./dev.py dist               # collect the release artifacts into ./dist
 ./dev.py dist --debug       # collect the debug artifacts into ./dist-debug

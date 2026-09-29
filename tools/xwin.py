@@ -10,8 +10,11 @@ why the Windows target builds against the MSVC ABI and needs this.
 
 `xwin` (https://github.com/Jake-Shadle/xwin) downloads those packages straight
 from Microsoft and rearranges them into a layout a cross compiler can use.
-This script drives it: it pins the xwin release, verifies its checksum, unpacks
-the SDK once into the shared cache, and writes out the paths the build needs.
+This script drives it: it pins the xwin version, gets hold of it whichever way
+the host allows, unpacks the SDK once into the shared cache, and writes out the
+paths the build needs. xwin publishes binaries for Linux and Windows only, so
+on macOS it is compiled from source with cargo instead; either way the result
+is cached and the rest of this script does not care which happened.
 
     python tools/xwin.py setup --accept-msvc-license
     python tools/xwin.py paths --arch x86_64
@@ -38,8 +41,9 @@ from pathlib import Path
 VERSION = "0.10.0"
 RELEASE = f"https://github.com/Jake-Shadle/xwin/releases/download/{VERSION}"
 
-# Checksums as published next to each release asset. xwin has no macOS build,
-# which is why that host is reported as unsupported rather than guessed at.
+# Checksums as published next to each release asset. xwin builds for Linux and
+# Windows and nothing else, so a host missing from this table falls through to
+# compiling the tool instead; see build_tool.
 ASSETS = {
     ("Linux", "x86_64"): (
         "x86_64-unknown-linux-musl",
@@ -77,18 +81,50 @@ Re-run with {ACCEPT_LICENSE_FLAG} once you have, or set XWIN_ACCEPT_LICENSE=1.
 
 
 def host_asset():
-    """The xwin release asset for the machine this is running on."""
+    """The published xwin release for this machine, or None if there is none."""
     machine = platform.machine()
-    # Linux reports the same architecture under two names depending on distro.
+    # Linux and macOS report the same architecture under different names.
     if machine == "arm64":
         machine = "aarch64"
 
-    asset = ASSETS.get((platform.system(), machine))
-    if asset is None:
+    return ASSETS.get((platform.system(), machine))
+
+
+def build_tool():
+    """Compiles xwin from source, for hosts it publishes no binary for.
+
+    macOS is the case that matters: both Apple targets are in pixi.toml, and
+    neither can use a release that does not exist. cargo checks the crate it
+    downloads against crates.io's own checksum, which is the same kind of
+    anchor the sha256 table gives the prebuilt binaries, and `--locked` builds
+    against the Cargo.lock the crate ships so the dependency versions are
+    pinned rather than resolved afresh on every machine.
+    """
+    # Kept apart from the downloaded binaries, so that a host which gains a
+    # published release later picks it up instead of reusing this one.
+    root = CACHE / "tool" / f"xwin-{VERSION}-source"
+    binary = root / "bin" / ("xwin.exe" if os.name == "nt" else "xwin")
+    if binary.is_file():
+        return binary
+
+    if shutil.which("cargo") is None:
         sys.exit(
-            f"xwin.py: no xwin release for {platform.system()}/{machine}. "
-            "On macOS, build it yourself with `cargo install xwin` and put it on PATH.")
-    return asset
+            f"xwin.py: no xwin release is published for "
+            f"{platform.system()}/{platform.machine()}, so it has to be built from "
+            f"source, and cargo is not on PATH.\n"
+            f"  In this repository, `pixi install` provides it.\n"
+            f"  Otherwise install Rust (https://rustup.rs), or put an `xwin` "
+            f"binary on PATH yourself and this script will use that instead.")
+
+    print(f"no xwin release for {platform.system()}/{platform.machine()}; "
+          f"building {VERSION} from source, which takes a few minutes",
+          flush=True)
+    # Only the compiled binary lands in the repository cache. cargo's own
+    # registry and build caches stay wherever cargo keeps them, rather than
+    # being duplicated per checkout.
+    subprocess.run(["cargo", "install", "xwin", "--version", VERSION,
+                    "--locked", "--root", str(root)], check=True)
+    return binary
 
 
 def download(url, destination):
@@ -105,7 +141,11 @@ def fetch_tool():
     if existing:
         return Path(existing)
 
-    target, digest = host_asset()
+    asset = host_asset()
+    if asset is None:
+        return build_tool()
+
+    target, digest = asset
     binary = CACHE / "tool" / f"xwin-{VERSION}" / ("xwin.exe" if os.name == "nt" else "xwin")
     if binary.is_file():
         return binary

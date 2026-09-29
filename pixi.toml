@@ -16,3 +16,13 @@ python = "3.14.7.*"
 #   - cannot create static archives on Intel macOS hosts.
 #   - panics during cold Linux C++ cross-links on Windows hosts.
 zig = "0.15.2.*"
+
+# xwin publishes binaries for Linux and Windows only, so tools/xwin.py compiles
+# it from source on macOS. Rust is pulled in for those two hosts and nowhere
+# else, since the others download the release and never invoke cargo. 1.85 is
+# the floor for the 2024 edition xwin is written in.
+[target.osx-64.dependencies]
+rust = ">=1.85"
+
+[target.osx-arm64.dependencies]
+rust = ">=1.85"

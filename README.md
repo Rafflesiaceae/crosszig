@@ -160,13 +160,31 @@ Microsoft's and agreeing to their terms is not `dev.py`'s call; without it the
 licence and its URL are printed and nothing is fetched. `XWIN_ACCEPT_LICENSE=1`
 does the same for CI.
 
-The fetch downloads [xwin](https://github.com/Jake-Shadle/xwin) at a pinned
-version, checks it against the published sha256, and has it pull the CRT and
-SDK straight from Microsoft into `.cache/xwin/` (around 150 MB over the wire
-and 1.1 GB unpacked for the x86 and x86_64 libraries together; the headers are
-shared). Both architectures are unpacked in one go, since they share the
-headers. `tools/xwin.py` is standalone, no imports from the rest of the
-repository, and still does the job on its own:
+The fetch gets hold of [xwin](https://github.com/Jake-Shadle/xwin) at a pinned
+version and has it pull the CRT and SDK straight from Microsoft into
+`.cache/xwin/` (around 150 MB over the wire and 1.1 GB unpacked for the x86
+and x86_64 libraries together; the headers are shared). Both architectures are
+unpacked in one go, since they share the headers.
+
+How xwin itself is obtained depends on the host, because it publishes binaries
+for Linux and Windows only:
+
+| Host                          | How `tools/xwin.py` gets xwin                     |
+| ----------------------------- | ------------------------------------------------- |
+| An `xwin` already on `PATH`   | Used as is, whatever its version                   |
+| `linux-64`, `linux-aarch64`, `win-64` | Downloads the pinned release and checks it against the published sha256 |
+| `osx-64`, `osx-arm64`         | `cargo install xwin --version <pinned> --locked`   |
+
+The macOS path is why `pixi.toml` lists `rust` under `[target.osx-64]` and
+`[target.osx-arm64]` and nowhere else. cargo checks the crate against
+crates.io's own checksum, which is the same kind of anchor the sha256 gives
+the prebuilt binaries, and `--locked` uses the `Cargo.lock` the crate ships so
+the dependency versions do not drift between machines. Only the compiled
+binary lands in `.cache/`; cargo's registry cache stays wherever cargo keeps
+it. Either way the result is cached, so this happens once.
+
+`tools/xwin.py` is standalone, no imports from the rest of the repository, and
+still does the job on its own:
 
 ```sh
 python tools/xwin.py setup --accept-msvc-license

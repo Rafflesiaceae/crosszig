@@ -148,13 +148,13 @@ Those libraries only ship inside Visual Studio and the Windows SDK and are not
 redistributable, so they have to be fetched once:
 
 ```sh
-./dev.py build -t win-64-msvc --accept-license
+./dev.py build -t win-64-msvc --accept-msvc-license
 ```
 
 `./dev.py build` and `./dev.py run` fetch the SDK themselves whenever a
 platform they were asked for declares `"sdk": "xwin"` and the cache does not
 have it yet, before configuring anything. The check is a couple of `stat`
-calls, so every build after the first is unaffected. `--accept-license` is
+calls, so every build after the first is unaffected. `--accept-msvc-license` is
 forwarded rather than assumed, because what is being downloaded is
 Microsoft's and agreeing to their terms is not `dev.py`'s call; without it the
 licence and its URL are printed and nothing is fetched. `XWIN_ACCEPT_LICENSE=1`
@@ -169,7 +169,7 @@ headers. `tools/xwin.py` is standalone, no imports from the rest of the
 repository, and still does the job on its own:
 
 ```sh
-python tools/xwin.py setup --accept-license
+python tools/xwin.py setup --accept-msvc-license
 ```
 
 Configuring with cmake directly, rather than through `dev.py`, is the one path

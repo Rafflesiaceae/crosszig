@@ -221,14 +221,14 @@ def ensure_sdk(targets, accept_license=False):
     # One setup unpacks every architecture xwin.py knows about, so which of
     # the MSVC targets were asked for only decides whether to run it at all.
     #
-    # --accept-license is forwarded rather than always passed: the download is
+    # The flag is forwarded rather than always passed: the download is
     # Microsoft's non-redistributable CRT and SDK, and agreeing to their terms
     # is not a thing this script gets to do on the caller's behalf. Without it
     # xwin.py prints the licence and the URL and stops, which is the one-time
     # cost of a first Windows build.
     command = [sys.executable, ROOT / "tools" / "xwin.py", "setup"]
     if accept_license:
-        command.append("--accept-license")
+        command.append(xwin.ACCEPT_LICENSE_FLAG)
     run(command)
 
 
@@ -462,7 +462,8 @@ def main():
                                help="use the release configuration (default: debug)")
         subparser.add_argument("-v", "--verbose", action="store_true",
                                help="show the build output unfiltered")
-        subparser.add_argument("--accept-license", action="store_true",
+        subparser.add_argument(xwin.ACCEPT_LICENSE_FLAG, dest="accept_license",
+                               action="store_true",
                                help="accept Microsoft's licence for the CRT and SDK, "
                                     "which the Windows targets need fetched once")
 

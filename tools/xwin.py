@@ -13,7 +13,7 @@ from Microsoft and rearranges them into a layout a cross compiler can use.
 This script drives it: it pins the xwin release, verifies its checksum, unpacks
 the SDK once into the shared cache, and writes out the paths the build needs.
 
-    python tools/xwin.py setup --accept-license
+    python tools/xwin.py setup --accept-msvc-license
     python tools/xwin.py paths --arch x86_64
     python tools/xwin.py clean
 
@@ -60,13 +60,19 @@ TARGET_ARCHES = ("x86_64", "x86")
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / ".cache" / "xwin"
 
-LICENSE_NOTICE = """
+# A constant because the notice below has to name it and dev.py forwards it by
+# the same spelling. Qualified rather than just naming a licence, because in
+# dev.py it sits among flags that have nothing to do with Microsoft and would
+# otherwise read as a licence for the build itself.
+ACCEPT_LICENSE_FLAG = "--accept-msvc-license"
+
+LICENSE_NOTICE = f"""
 The Windows SDK and the MSVC CRT are Microsoft's, and downloading them means
 accepting their licence. Read it first:
 
     https://go.microsoft.com/fwlink/?LinkId=2086102
 
-Re-run with --accept-license once you have, or set XWIN_ACCEPT_LICENSE=1.
+Re-run with {ACCEPT_LICENSE_FLAG} once you have, or set XWIN_ACCEPT_LICENSE=1.
 """
 
 
@@ -186,6 +192,8 @@ def command_setup(args):
 
     subprocess.run([
         str(tool),
+        # xwin's own flag, not ACCEPT_LICENSE_FLAG: consent has been given by
+        # the time we get here, and this is what passes it on.
         "--accept-license",
         *architectures,
         # xwin's own download cache, kept so that a repeat run is offline.
@@ -201,8 +209,8 @@ def command_setup(args):
 
 def command_paths(args):
     if not is_ready():
-        sys.exit("xwin.py: not set up. "
-                 "Run `python tools/xwin.py setup --accept-license` first.")
+        sys.exit("xwin.py: not set up. Run "
+                 f"`python tools/xwin.py setup {ACCEPT_LICENSE_FLAG}` first.")
     print(json.dumps(sdk_paths(args.arch)))
 
 
@@ -217,7 +225,8 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     setup = subparsers.add_parser("setup", help="download and unpack the SDK if needed")
-    setup.add_argument("--accept-license", action="store_true",
+    setup.add_argument(ACCEPT_LICENSE_FLAG, dest="accept_license",
+                       action="store_true",
                        help="accept Microsoft's licence for the SDK and CRT")
     setup.add_argument("--force", action="store_true",
                        help="unpack again even if the cache looks complete")

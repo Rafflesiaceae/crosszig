@@ -92,7 +92,7 @@ if(_crosszig_sdk STREQUAL "xwin")
         message(FATAL_ERROR
                 "Target '${CROSSZIG_TARGET}' builds against Microsoft's CRT and Windows "
                 "SDK, which are not redistributable and so have to be fetched once:\n"
-                "    python tools/xwin.py setup --accept-license\n"
+                "    python tools/xwin.py setup --accept-msvc-license\n"
                 "${_crosszig_xwin_error}")
     endif()
 

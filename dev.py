@@ -64,6 +64,9 @@ def load_tool(file_name):
 # macOS container.
 dist_manifest = load_tool("dist-manifest.py")
 universal = load_tool("macos-universal.py")
+# Not general at all, but standalone for the same reason: it is driven both
+# from here and straight from the toolchain file, which cannot import anything.
+xwin = load_tool("xwin.py")
 
 # The one place the platforms are spelled out is cmake/targets.json, which the
 # toolchain file reads as well.
@@ -194,6 +197,41 @@ def install_dir(target, config):
     return build_dir(target, config) / "install"
 
 
+def ensure_sdk(targets, accept_license=False):
+    """Fetches whatever SDK the chosen platforms need and the cache lacks.
+
+    Only the MSVC targets need one. `xwin.is_ready()` is what keeps this a
+    no-op on every build after the first, so it can be called unconditionally
+    the way the cmake invocation below is. Doing it here rather than leaving it
+    to the toolchain file also means it happens once per `build`, before
+    anything is configured, instead of once per platform after six of them
+    have already been built.
+    """
+    _cpu, platforms = toolchain_targets()
+    wanted = {platforms[target].get("sdk") for target in targets} - {None}
+
+    unsupported = sorted(wanted - {"xwin"})
+    if unsupported:
+        sys.exit(f"dev.py: cmake/targets.json asks for the "
+                 f"'{unsupported[0]}' SDK, which dev.py cannot set up")
+
+    if not wanted or xwin.is_ready():
+        return
+
+    # One setup unpacks every architecture xwin.py knows about, so which of
+    # the MSVC targets were asked for only decides whether to run it at all.
+    #
+    # --accept-license is forwarded rather than always passed: the download is
+    # Microsoft's non-redistributable CRT and SDK, and agreeing to their terms
+    # is not a thing this script gets to do on the caller's behalf. Without it
+    # xwin.py prints the licence and the URL and stops, which is the one-time
+    # cost of a first Windows build.
+    command = [sys.executable, ROOT / "tools" / "xwin.py", "setup"]
+    if accept_license:
+        command.append("--accept-license")
+    run(command)
+
+
 def build_one(target, config, jobs=None, clean=False, verbose=False):
     """Configure, build and install a single target platform."""
     output = build_dir(target, config)
@@ -316,6 +354,8 @@ def command_build(args):
 
     config = config_name(args.release)
 
+    ensure_sdk(targets, args.accept_license)
+
     for target in targets:
         print(f"\n== {target} ({config}) ==", flush=True)
         build_one(target, config, jobs=args.jobs, clean=args.clean,
@@ -325,6 +365,7 @@ def command_build(args):
 def command_run(args):
     target = host_platform()
     config = config_name(args.release)
+    ensure_sdk([target], args.accept_license)
     build_one(target, config, jobs=args.jobs, verbose=args.verbose)
 
     _cpu, platforms = toolchain_targets()
@@ -416,14 +457,17 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    def add_release_flag(subparser):
+    def add_build_flags(subparser):
         subparser.add_argument("-r", "--release", action="store_true",
                                help="use the release configuration (default: debug)")
         subparser.add_argument("-v", "--verbose", action="store_true",
                                help="show the build output unfiltered")
+        subparser.add_argument("--accept-license", action="store_true",
+                               help="accept Microsoft's licence for the CRT and SDK, "
+                                    "which the Windows targets need fetched once")
 
     build = subparsers.add_parser("build", help="cross compile the project")
-    add_release_flag(build)
+    add_build_flags(build)
     build.add_argument("-j", "--jobs", type=int, help="number of parallel compile jobs")
     build.add_argument("-a", "--all", action="store_true",
                        help="build for every supported platform")
@@ -436,7 +480,7 @@ def main():
     build.set_defaults(func=command_build)
 
     run_parser = subparsers.add_parser("run", help="build for the host and run the binary")
-    add_release_flag(run_parser)
+    add_build_flags(run_parser)
     run_parser.add_argument("-j", "--jobs", type=int, help="number of parallel compile jobs")
     run_parser.add_argument("args", nargs=argparse.REMAINDER,
                             help="arguments passed on to the binary")

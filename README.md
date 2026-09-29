@@ -148,18 +148,33 @@ Those libraries only ship inside Visual Studio and the Windows SDK and are not
 redistributable, so they have to be fetched once:
 
 ```sh
+./dev.py build -t win-64-msvc --accept-license
+```
+
+`./dev.py build` and `./dev.py run` fetch the SDK themselves whenever a
+platform they were asked for declares `"sdk": "xwin"` and the cache does not
+have it yet, before configuring anything. The check is a couple of `stat`
+calls, so every build after the first is unaffected. `--accept-license` is
+forwarded rather than assumed, because what is being downloaded is
+Microsoft's and agreeing to their terms is not `dev.py`'s call; without it the
+licence and its URL are printed and nothing is fetched. `XWIN_ACCEPT_LICENSE=1`
+does the same for CI.
+
+The fetch downloads [xwin](https://github.com/Jake-Shadle/xwin) at a pinned
+version, checks it against the published sha256, and has it pull the CRT and
+SDK straight from Microsoft into `.cache/xwin/` (around 150 MB over the wire
+and 1.1 GB unpacked for the x86 and x86_64 libraries together; the headers are
+shared). Both architectures are unpacked in one go, since they share the
+headers. `tools/xwin.py` is standalone, no imports from the rest of the
+repository, and still does the job on its own:
+
+```sh
 python tools/xwin.py setup --accept-license
 ```
 
-That downloads [xwin](https://github.com/Jake-Shadle/xwin) at a pinned version,
-checks it against the published sha256, and has it pull the CRT and SDK
-straight from Microsoft into `.cache/xwin/` (around 150 MB over the wire and
-1.1 GB unpacked for the x86 and x86_64 libraries together; the headers are
-shared). It is cached, so this is a one-time cost, and
-`tools/xwin.py` is standalone: no imports from the rest of the repository.
-Both architectures are unpacked in one go, since they share the headers.
-Until it has been run, building either Windows target stops with that command
-in the error message.
+Configuring with cmake directly, rather than through `dev.py`, is the one path
+that does not fetch anything: the toolchain file can only report the missing
+SDK, and does so with that command in the error message.
 
 Three things make this target different from the others, all of them recorded
 in `cmake/targets.json`:

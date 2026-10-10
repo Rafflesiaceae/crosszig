@@ -2,7 +2,7 @@
 # link rules, which is exactly what CMAKE_USER_MAKE_RULES_OVERRIDE_<LANG> is
 # for. Only the MSVC ABI target pulls this in.
 #
-# Targeting that ABI makes CMake build lld-link style link lines, and two
+# Targeting that ABI makes CMake build lld-link style link lines, and three
 # things in them do not survive contact with zig:
 #
 #   - `/version:<major>.<minor>`. zig's linker insists on three components and
@@ -11,6 +11,11 @@
 #     libraries by hand, but on this ABI they also drop the CRT itself. lld
 #     then falls back to the wide GUI startup object and a console program
 #     fails to link with "undefined symbol: wWinMainCRTStartup".
+#   - `-Xlinker /MANIFEST:EMBED`. Upstream zig rejects it outright with
+#     "unsupported linker arg". Some zig distributions (the conda-forge builds
+#     for Linux and Windows among them) quietly drop it, which is why only
+#     some hosts trip over it. zig cannot embed a manifest either way, so
+#     nothing is lost by not asking for one.
 
 foreach(_rule CMAKE_C_LINK_EXECUTABLE CMAKE_CXX_LINK_EXECUTABLE
               CMAKE_C_CREATE_SHARED_LIBRARY CMAKE_CXX_CREATE_SHARED_LIBRARY
@@ -20,5 +25,6 @@ foreach(_rule CMAKE_C_LINK_EXECUTABLE CMAKE_CXX_LINK_EXECUTABLE
                        "/version:<TARGET_VERSION_MAJOR>.<TARGET_VERSION_MINOR>.0"
                        ${_rule} "${${_rule}}")
         string(REPLACE " -nostartfiles -nostdlib" "" ${_rule} "${${_rule}}")
+        string(REPLACE " -Xlinker /MANIFEST:EMBED" "" ${_rule} "${${_rule}}")
     endif()
 endforeach()

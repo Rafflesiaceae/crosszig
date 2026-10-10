@@ -41,3 +41,17 @@ jobs:
 
       - name: Dist
         run: pixi run dev dist
+
+      # CMake only prints the outcome of its compiler checks; the actual
+      # compiler and linker output of every try_compile lands in these logs.
+      # Keep them around when the build breaks so failures that only happen on
+      # one runner can be diagnosed without reproducing them locally.
+      - name: Upload CMake logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmake-logs-${{ matrix.platform }}
+          path: |
+            build/*/CMakeFiles/CMakeConfigureLog.yaml
+            build/*/CMakeCache.txt
+          if-no-files-found: ignore

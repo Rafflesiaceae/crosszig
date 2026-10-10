@@ -201,7 +201,11 @@ def write_libc_file(paths):
         f"crt_dir={sdk / 'sdk' / 'lib' / 'ucrt' / arch}\n"
         f"msvc_lib_dir={sdk / 'crt' / 'lib' / arch}\n"
         f"kernel32_lib_dir={sdk / 'sdk' / 'lib' / 'um' / arch}\n"
-        f"gcc_dir=\n")
+        f"gcc_dir=\n",
+        # zig splits this file on "\n" only. Text mode would write CRLF on
+        # Windows hosts, leaving a stray "\r" on every path and making zig
+        # unable to find kernel32 & co.
+        newline="\n")
 
 
 def is_ready():

@@ -123,7 +123,13 @@ if(_crosszig_sdk STREQUAL "xwin")
     endforeach()
 endif()
 
-find_program(CROSSZIG_ZIG_EXECUTABLE NAMES zig REQUIRED
+# On Windows conda-forge only provides `zig` as zig.bat/zig.cmd wrappers, which
+# find_program does not consider (it only tries .com and .exe). Those wrappers
+# merely forward to the triplet prefixed executable, so that is looked for too;
+# using it directly also keeps batch files out of the generated shims.
+find_program(CROSSZIG_ZIG_EXECUTABLE
+             NAMES zig x86_64-w64-mingw32-zig aarch64-w64-mingw32-zig
+             REQUIRED
              DOC "zig compiler used as the cross toolchain")
 
 # Location of zig's bundled library tree (headers, libc stubs, compiler-rt).

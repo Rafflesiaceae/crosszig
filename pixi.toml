@@ -12,10 +12,7 @@ dev = { cmd = ["python", "./dev.py"] }
 cmake = "4.4.3.*"
 ninja = "1.13.2.*"
 python = "3.14.7.*"
-# FIXME: Zig 0.16.0 currently causes issues:
-#   - cannot create static archives on Intel macOS hosts.
-#   - panics during cold Linux C++ cross-links on Windows hosts.
-zig = "0.15.2.*"
+zig = "0.17.*"
 
 # xwin publishes binaries for Linux and Windows only, so tools/xwin.py compiles
 # it from source on macOS. Rust is pulled in for those two hosts and nowhere

@@ -14,6 +14,8 @@
 list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
      CROSSZIG_TARGET
      CROSSZIG_ZIG_EXECUTABLE
+     CROSSZIG_LLVM_AR_EXECUTABLE
+     CROSSZIG_LLVM_RANLIB_EXECUTABLE
      CMAKE_MSVC_RUNTIME_LIBRARY
      CMAKE_USER_MAKE_RULES_OVERRIDE_C
      CMAKE_USER_MAKE_RULES_OVERRIDE_CXX)
@@ -186,8 +188,18 @@ endfunction()
 _crosszig_wrapper(_crosszig_cc  zig-cc  cc  -target ${_crosszig_triple} -mcpu=${_crosszig_cpu})
 _crosszig_wrapper(_crosszig_cxx zig-cxx ${_crosszig_cxx_driver}
                   -target ${_crosszig_triple} -mcpu=${_crosszig_cpu})
-_crosszig_wrapper(_crosszig_ar     zig-ar     ar)
-_crosszig_wrapper(_crosszig_ranlib zig-ranlib ranlib)
+if(CMAKE_HOST_APPLE)
+    # Zig's bundled archiver fails to create new archives on macOS 26.
+    # Use the standalone LLVM tools supplied by Pixi on these hosts. Apple's
+    # system tools cannot index the ELF and COFF objects we also produce.
+    find_program(CROSSZIG_LLVM_AR_EXECUTABLE NAMES llvm-ar REQUIRED)
+    find_program(CROSSZIG_LLVM_RANLIB_EXECUTABLE NAMES llvm-ranlib REQUIRED)
+    set(_crosszig_ar "${CROSSZIG_LLVM_AR_EXECUTABLE}")
+    set(_crosszig_ranlib "${CROSSZIG_LLVM_RANLIB_EXECUTABLE}")
+else()
+    _crosszig_wrapper(_crosszig_ar     zig-ar     ar)
+    _crosszig_wrapper(_crosszig_ranlib zig-ranlib ranlib)
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     # CMake enables the RC language for Windows targets and insists on a real

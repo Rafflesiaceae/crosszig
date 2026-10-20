@@ -335,6 +335,10 @@ version namespace rather than on the library, because that is the part that
 decides compatibility: `GLIBC_2.3.3` means glibc 2.3.3 or newer regardless of
 which of libc, libm or libpthread pulled it in.
 
+ELF `needs` also includes the interpreter's basename, since the loader is
+required whether or not the linker repeats it in `DT_NEEDED`. Its full path
+is still checked separately by `interpreter`.
+
 Three of those keys are there because the obvious reading of a file leaves a
 real compatibility question open:
 

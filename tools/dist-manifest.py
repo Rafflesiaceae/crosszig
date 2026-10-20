@@ -56,6 +56,9 @@ sorted list of the architectures the file carries.
 Dependency names are whatever the format itself stores: a soname for ELF
 (`libc.so.6`), an import table entry for PE (`KERNEL32.dll`), an install name
 for Mach-O (`/usr/lib/libSystem.B.dylib`).
+ELF also includes the basename of its interpreter in `needs`: the loader is
+required whether or not the linker also lists it in DT_NEEDED. Its full path
+is pinned separately by `interpreter`.
 
 One thing deliberately absent: the CPU baseline the code was generated for.
 Nothing in any of these containers records it unless the toolchain emits a
@@ -177,17 +180,23 @@ def _elf(data):
             elif tag in (15, 29):  # DT_RPATH, DT_RUNPATH
                 runpath += [part for part in _cstring(data, strings + value).split(":") if part]
 
+    interpreter = _elf_interpreter(data, sections)
+    # The interpreter's loader is required even when DT_NEEDED omits it. Different
+    # linkers can list it in either or both places without changing what loads.
+    if interpreter is not None:
+        needs.append(interpreter.rsplit("/", 1)[-1])
+
     result = {
         "format": "elf",
         "arch": _ELF_MACHINES.get(struct.unpack_from(order + "H", data, 0x12)[0],
                                   _unknown(struct.unpack_from(order + "H", data, 0x12)[0])),
-        "needs": sorted(needs),
+        "needs": sorted(set(needs)),
         "symbol-versions": _elf_symbol_versions(data, order, sections),
         "runpath": sorted(runpath),
         # null for a statically linked image. Without this a static binary and
         # a dynamic one that happens to need nothing look identical, and the
         # path itself is architecture specific, so it is worth pinning down.
-        "interpreter": _elf_interpreter(data, sections),
+        "interpreter": interpreter,
     }
 
     kernel = _elf_min_kernel(data, order, sections)

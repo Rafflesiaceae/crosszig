@@ -201,7 +201,9 @@ def write_libc_file(paths):
         f"crt_dir={sdk / 'sdk' / 'lib' / 'ucrt' / arch}\n"
         f"msvc_lib_dir={sdk / 'crt' / 'lib' / arch}\n"
         f"kernel32_lib_dir={sdk / 'sdk' / 'lib' / 'um' / arch}\n"
-        f"gcc_dir=\n",
+        f"gcc_dir=\n"
+        # Zig requires every libc field, even when it is unused on Windows.
+        f"darwin_sdk_dir=\n",
         # zig splits this file on "\n" only. Text mode would write CRLF on
         # Windows hosts, leaving a stray "\r" on every path and making zig
         # unable to find kernel32 & co.
@@ -217,6 +219,10 @@ def is_ready():
 
 def command_setup(args):
     if is_ready() and not args.force:
+        # Refresh descriptions when Zig's libc file format changes without
+        # downloading or unpacking the already cached SDK again.
+        for arch in TARGET_ARCHES:
+            write_libc_file(sdk_paths(arch))
         print(f"already set up in {CACHE}")
         print(json.dumps([sdk_paths(arch) for arch in TARGET_ARCHES], indent=4))
         return
@@ -255,7 +261,10 @@ def command_paths(args):
     if not is_ready():
         sys.exit("xwin.py: not set up. Run "
                  f"`python tools/xwin.py setup {ACCEPT_LICENSE_FLAG}` first.")
-    print(json.dumps(sdk_paths(args.arch)))
+    paths = sdk_paths(args.arch)
+    # dev.py skips setup for a ready cache, so refresh this entry point too.
+    write_libc_file(paths)
+    print(json.dumps(paths))
 
 
 def command_clean(_args):

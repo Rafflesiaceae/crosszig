@@ -158,6 +158,22 @@ if(_crosszig_zig_libc AND CMAKE_HOST_WIN32)
     set(CROSSZIG_WRAPPER_ENV "set \"ZIG_LIBC=${_crosszig_zig_libc}\"")
 elseif(_crosszig_zig_libc)
     set(CROSSZIG_WRAPPER_ENV "export ZIG_LIBC=\"${_crosszig_zig_libc}\"")
+elseif(CMAKE_HOST_APPLE AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    # Conda-forge's Zig probes ../../lib relative to ZIG_LIB_DIR for shared
+    # libc++. On a matching host architecture that picks up Pixi's runtime,
+    # giving the binary an @rpath dependency absent from cross-host builds.
+    # A separate library root keeps that probe away from host libraries and
+    # makes Zig use its bundled static runtime. Link the entries individually:
+    # linking the root itself would make ../.. resolve into the host prefix.
+    set(_crosszig_static_lib_dir "${_crosszig_bin_dir}/runtime/lib/zig")
+    file(MAKE_DIRECTORY "${_crosszig_static_lib_dir}")
+    file(GLOB _crosszig_lib_entries RELATIVE "${_crosszig_zig_lib_dir}"
+         "${_crosszig_zig_lib_dir}/*")
+    foreach(_crosszig_entry IN LISTS _crosszig_lib_entries)
+        file(CREATE_LINK "${_crosszig_zig_lib_dir}/${_crosszig_entry}"
+                         "${_crosszig_static_lib_dir}/${_crosszig_entry}" SYMBOLIC)
+    endforeach()
+    set(CROSSZIG_WRAPPER_ENV "export ZIG_LIB_DIR=\"${_crosszig_static_lib_dir}\"")
 else()
     set(CROSSZIG_WRAPPER_ENV "")
 endif()

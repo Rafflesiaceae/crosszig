@@ -7,11 +7,7 @@
                 "ld-linux.so.2",
                 "libc.so.6",
                 "libdl.so.2",
-                "libm.so.6",
-                "libpthread.so.0",
-                "libresolv.so.2",
-                "librt.so.1",
-                "libutil.so.1"
+                "libpthread.so.0"
             ],
             "symbol-versions": {
                 "GLIBC": "2.3.2"
@@ -27,14 +23,10 @@
                 "ld-linux-x86-64.so.2",
                 "libc.so.6",
                 "libdl.so.2",
-                "libm.so.6",
-                "libpthread.so.0",
-                "libresolv.so.2",
-                "librt.so.1",
-                "libutil.so.1"
+                "libpthread.so.0"
             ],
             "symbol-versions": {
-                "GLIBC": "2.3.3"
+                "GLIBC": "2.3.2"
             },
             "runpath": [],
             "interpreter": "/lib64/ld-linux-x86-64.so.2",
@@ -47,11 +39,7 @@
                 "ld-linux-aarch64.so.1",
                 "libc.so.6",
                 "libdl.so.2",
-                "libm.so.6",
-                "libpthread.so.0",
-                "libresolv.so.2",
-                "librt.so.1",
-                "libutil.so.1"
+                "libpthread.so.0"
             ],
             "symbol-versions": {
                 "GLIBC": "2.17"
